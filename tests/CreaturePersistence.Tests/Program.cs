@@ -31,7 +31,7 @@ static class Program
         {
             AssetManager.SourceRoot = root;
             ModManager.ActiveMods.Add(new() { id = "creature-author", path = root });
-            string path = Path.Combine(root, "World", "B5", "world_B5.txt");
+            string path = Path.Combine(root, "world", "b5", "world_b5.txt");
             Directory.CreateDirectory(Path.GetDirectoryName(path));
             string original = "ROOMS\r\nB5_BDF01 : <3>B5_BDF01, DISCONNECTED, DISCONNECTED, DISCONNECTED\r\nEND ROOMS\r\nCREATURES\r\n(X-Artificer,Inv,Spear)B5_BDF01 : 2-RedLizard\r\nEND CREATURES\r\n// custom directive stays\r\n";
             File.WriteAllText(path, original);
