@@ -1,0 +1,183 @@
+using System;
+using System.Collections.Generic;
+using System.Linq;
+
+namespace DryCycle.DevUI.DevTool.Map.Cartography;
+
+// Author data only. Room tiles, resolved connections, selection and render caches never enter this model.
+internal enum CartographyItemKind { Room, Text, Marker, Line, Box, Connection, Image }
+internal enum CartographyMarker { Pin, Shelter, Gate, Pearl, Danger, Sprite, AncientShelter, Trader, Outpost, Treasury, Echo, Broadcast, Vista, Token, Slugcat, Diamond }
+internal enum CartographyAlignment { Left, CenterX, Right, Top, CenterY, Bottom, DistributeX, DistributeY }
+
+internal readonly struct CartographyRect
+{
+    internal CartographyRect(float x, float y, float width, float height)
+    { X = x; Y = y; Width = width; Height = height; }
+    internal float X { get; }
+    internal float Y { get; }
+    internal float Width { get; }
+    internal float Height { get; }
+    internal float Right => X + Width;
+    internal float Bottom => Y + Height;
+    internal bool Contains(float x, float y) => x >= X && y >= Y && x <= Right && y <= Bottom;
+    internal bool Intersects(CartographyRect other) => X <= other.Right && Right >= other.X && Y <= other.Bottom && Bottom >= other.Y;
+    internal CartographyRect Offset(float x, float y) => new(X + x, Y + y, Width, Height);
+    internal CartographyRect Inflate(float size) => new(X - size, Y - size, Width + size * 2, Height + size * 2);
+    internal static CartographyRect Union(CartographyRect a, CartographyRect b) =>
+        new(Math.Min(a.X, b.X), Math.Min(a.Y, b.Y), Math.Max(a.Right, b.Right) - Math.Min(a.X, b.X), Math.Max(a.Bottom, b.Bottom) - Math.Min(a.Y, b.Y));
+}
+
+internal sealed class CartographyLayer
+{
+    public string Id = Guid.NewGuid().ToString("N");
+    public string Name = "Layer";
+    public bool Visible = true;
+    public bool Locked;
+    public float Opacity = 1;
+    internal CartographyLayer Clone() => (CartographyLayer)MemberwiseClone();
+}
+
+internal sealed class CartographyItem
+{
+    public string Id = Guid.NewGuid().ToString("N");
+    public CartographyItemKind Kind;
+    public string LayerId = "notes";
+    public string Room = string.Empty;
+    public string Text = string.Empty;
+    public float X;
+    public float Y;
+    public float Width = 100;
+    public float Height = 60;
+    public float Size = 20;
+    public float Stroke = 2;
+    public uint Color = 0xFFF2D9A6; // AARRGGBB, independent of renderer packing.
+    public bool Visible = true;
+    public CartographyMarker Marker;
+    public CartographyAppearance Appearance = new();
+    public List<CartographyPoint> Points = new();
+    internal CartographyItem Clone()
+    {
+        CartographyItem copy = (CartographyItem)MemberwiseClone();
+        copy.Appearance = Appearance.Clone(); copy.Points = Points.Select(p => p.Clone()).ToList();
+        return copy;
+    }
+}
+
+internal sealed class CartographyDocument
+{
+    internal const int FormatVersion = 2;
+    public string Identity = string.Empty;
+    public string Region = string.Empty;
+    public string Title = string.Empty;
+    public string FontFamily = "Microsoft YaHei UI";
+    public uint Background = 0xFF161E2B;
+    public uint Terrain = 0xFFCFDAE3;
+    public uint Water = 0xB34D9FD1;
+    public uint Connections = 0xFFB8C3D0;
+    public bool ShowRoomNames = true;
+    // Optional Cartography-only visual rule: when enabled, keep authored curved terrain solid from
+    // its visible surface down to the room floor. This does not mutate RoomSettings or gameplay collision.
+    public bool SolidTerrain = false;
+    public bool ShowConnections = true;
+    public bool Transparent = true;
+    public bool CropSolid = true;
+    public float ExportScale = 2;
+    public int Padding = 32;
+    public readonly List<CartographyLayer> Layers = new(); // Back to front.
+    public readonly List<CartographyItem> Items = new();
+    public CartographyOptions Options = new();
+    public readonly List<CartographyPalette> Palettes = new();
+
+    internal CartographyDocument Clone()
+    {
+        CartographyDocument copy = new()
+        {
+            Identity = Identity, Region = Region, Title = Title, FontFamily = FontFamily,
+            Background = Background, Terrain = Terrain, Water = Water, Connections = Connections,
+            ShowRoomNames = ShowRoomNames, SolidTerrain = SolidTerrain, ShowConnections = ShowConnections, Transparent = Transparent,
+            CropSolid = CropSolid, ExportScale = ExportScale, Padding = Padding
+        };
+        copy.Layers.AddRange(Layers.Select(layer => layer.Clone()));
+        copy.Items.AddRange(Items.Select(item => item.Clone()));
+        copy.Options = Options.Clone(); copy.Palettes.AddRange(Palettes.Select(p => p.Clone()));
+        return copy;
+    }
+
+    internal CartographyLayer Layer(string id) => Layers.Find(layer => layer.Id == id);
+    internal bool Editable(CartographyItem item) => item.Visible && Layer(item.LayerId) is { Visible: true, Locked: false };
+
+    internal void Validate()
+    {
+        CartographyRecord.Validate(Options);
+        RequireRange(Options.WaterOpacity, 0, 1, "water opacity");
+        RequireRange(Options.BorderSize, 0, 32, "border");
+        if (Options.ExportArea && (Options.AreaWidth <= 0 || Options.AreaHeight <= 0)) throw new InvalidOperationException("Export area must have positive dimensions.");
+        if (Palettes.Count > 256 || Palettes.Select(p => p.Name).Distinct().Count() != Palettes.Count) throw new InvalidOperationException("Invalid subregion palettes.");
+        foreach (CartographyPalette palette in Palettes) CartographyRecord.Validate(palette);
+        if (string.IsNullOrWhiteSpace(Identity) || Identity.Length > 4096 || string.IsNullOrWhiteSpace(Region))
+            throw new InvalidOperationException("The cartography document has no valid source identity.");
+        if (Title == null || Title.Length > 512 || string.IsNullOrWhiteSpace(FontFamily) || FontFamily.Length > 128)
+            throw new InvalidOperationException("Invalid map title or font.");
+        if (Layers.Count == 0 || Layers.Count > 128 || Items.Count > 20000)
+            throw new InvalidOperationException("A map requires 1–128 layers and at most 20,000 objects.");
+        HashSet<string> layerIds = new(StringComparer.Ordinal);
+        foreach (CartographyLayer layer in Layers)
+        {
+            if (string.IsNullOrWhiteSpace(layer.Id) || !layerIds.Add(layer.Id) || string.IsNullOrWhiteSpace(layer.Name) || layer.Name.Length > 160)
+                throw new InvalidOperationException("Layer names and unique IDs are required.");
+            RequireRange(layer.Opacity, 0, 1, "layer opacity");
+        }
+        if (!layerIds.Contains("links")) throw new InvalidOperationException("The connections layer is required.");
+        HashSet<string> ids = new(StringComparer.Ordinal);
+        Dictionary<string, CartographyItem> itemsById = new(StringComparer.Ordinal);
+        HashSet<string> rooms = new(StringComparer.OrdinalIgnoreCase);
+        foreach (CartographyItem item in Items)
+        {
+            CartographyRecord.Validate(item.Appearance);
+            RequireRange(item.Appearance.Opacity, 0, 1, "object opacity");
+            RequireRange(item.Appearance.Outline, 0, 32, "outline");
+            RequireRange(item.Appearance.Scale, .1f, 10, "object scale");
+            if (item.Points.Count > 4096) throw new InvalidOperationException("Too many route points.");
+            foreach (CartographyPoint point in item.Points) { RequireRange(point.X, -1000000, 1000000, "route X"); RequireRange(point.Y, -1000000, 1000000, "route Y"); }
+            if (string.IsNullOrWhiteSpace(item.Id) || !ids.Add(item.Id) || !layerIds.Contains(item.LayerId) ||
+                !Enum.IsDefined(typeof(CartographyItemKind), item.Kind) || !Enum.IsDefined(typeof(CartographyMarker), item.Marker))
+                throw new InvalidOperationException("Invalid object identity, kind or layer reference.");
+            itemsById.Add(item.Id, item);
+            if (item.Text == null || item.Text.Length > 4096 || item.Room == null || item.Room.Length > 256)
+                throw new InvalidOperationException("Object text is too long.");
+            if (item.Kind == CartographyItemKind.Room && (string.IsNullOrWhiteSpace(item.Room) || !rooms.Add(item.Room)))
+                throw new InvalidOperationException("Each source room can appear only once in a map.");
+            RequireRange(item.X, -1000000, 1000000, "X");
+            RequireRange(item.Y, -1000000, 1000000, "Y");
+            RequireRange(item.Width, -100000, 100000, "width");
+            RequireRange(item.Height, -100000, 100000, "height");
+            RequireRange(item.Size, 4, 256, "text/icon size");
+            RequireRange(item.Stroke, 0.25f, 32, "stroke");
+        }
+        HashSet<string> complete = new(StringComparer.Ordinal), chain = new(StringComparer.Ordinal);
+        List<string> walked = new();
+        foreach (CartographyItem item in Items)
+        {
+            chain.Clear(); walked.Clear();
+            CartographyItem parent = item;
+            while (!complete.Contains(parent.Id))
+            {
+                if (!chain.Add(parent.Id)) throw new InvalidOperationException("Object parent cycle.");
+                walked.Add(parent.Id);
+                if (parent.Appearance.ParentId.Length == 0) break;
+                if (!itemsById.TryGetValue(parent.Appearance.ParentId, out parent))
+                    throw new InvalidOperationException("Missing parent object.");
+            }
+            complete.UnionWith(walked);
+        }
+        RequireRange(ExportScale, 0.25f, 8, "export scale");
+        if (Padding < 0 || Padding > 1024) throw new InvalidOperationException("Invalid export padding.");
+    }
+
+    private static void RequireRange(float value, float min, float max, string name)
+    {
+        if (float.IsNaN(value) || float.IsInfinity(value) || value < min || value > max)
+            throw new InvalidOperationException("Invalid " + name + ".");
+    }
+}
+

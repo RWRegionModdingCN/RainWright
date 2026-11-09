@@ -1,0 +1,11 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <LangVersion>13</LangVersion>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="../../src/Rainwright/Backend/Map/PlayerMapCoordinatePolicy.cs" Link="Production/PlayerMapCoordinatePolicy.cs" />
+    <Compile Include="../../src/Rainwright/Backend/Map/MapRoomLayer.cs" Link="Production/MapRoomLayer.cs" />
+  </ItemGroup>
+</Project>

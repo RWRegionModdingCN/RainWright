@@ -1,0 +1,374 @@
+using System;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.IO;
+
+namespace DryCycle.DevUI.DevTool.Sound;
+
+internal static class SoundSampleCatalog
+{
+    private const string DownpourModId = "moreslugcats";
+    private const string WatcherModId = "watcher";
+
+    private enum BuildPhase { Idle = 0, Samples = 1, Finalize = 2 }
+
+    private static Dictionary<string, EditorSoundSampleSnapshot> samples = new(StringComparer.OrdinalIgnoreCase);
+    private static Dictionary<string, string> loadedAmbientFiles = new(StringComparer.OrdinalIgnoreCase);
+    private static Dictionary<string, string> looseAmbientFiles = new(StringComparer.OrdinalIgnoreCase);
+    private static Dictionary<string, ModManager.Mod> modAmbientOwners = new(StringComparer.OrdinalIgnoreCase);
+    private static Dictionary<string, ModManager.Mod> officialDlcAmbientOwners = new(StringComparer.OrdinalIgnoreCase);
+    private static string[] publishedNames;
+    private static EditorSoundSampleSnapshot[] sortedCache = Array.Empty<EditorSoundSampleSnapshot>();
+    private static bool sortedDirty;
+    private static string[] requestedNames;
+    private static Dictionary<string, EditorSoundSampleSnapshot> buildingSamples;
+    private static Dictionary<string, string> buildingLoadedAmbientFiles;
+    private static Dictionary<string, string> buildingLooseAmbientFiles;
+    private static Dictionary<string, ModManager.Mod> buildingModAmbientOwners;
+    private static Dictionary<string, ModManager.Mod> buildingOfficialDlcAmbientOwners;
+    private static BuildPhase buildPhase;
+    private static int buildSampleIndex;
+    private static double maxBlockingUnitMilliseconds;
+    private static string maxBlockingUnit = string.Empty;
+
+    internal static double MaxBlockingUnitMilliseconds => maxBlockingUnitMilliseconds;
+    internal static string MaxBlockingUnit => maxBlockingUnit;
+    internal static int ProcessedSampleCount =>
+        buildPhase == BuildPhase.Idle
+            ? publishedNames?.Length ?? 0
+            : Math.Min(buildSampleIndex, requestedNames?.Length ?? 0);
+    internal static int TotalSampleCount => requestedNames?.Length ?? publishedNames?.Length ?? 0;
+    internal static float Progress => buildPhase switch
+    {
+        BuildPhase.Idle => publishedNames != null ? 1f : 0f,
+        BuildPhase.Samples => 0.03f + 0.94f * SampleProgress(),
+        BuildPhase.Finalize => 0.99f,
+        _ => 0f
+    };
+
+    internal static bool IsReadyForNames(string[] names) =>
+        buildPhase == BuildPhase.Idle && ReferenceEquals(publishedNames, names ?? Array.Empty<string>());
+
+    internal static void BeginRefresh()
+    {
+        if (!SoundFileNameCatalog.IsReady) return;
+        BeginBuild(SoundFileNameCatalog.CurrentNames ?? Array.Empty<string>());
+    }
+
+    internal static void BeginPrewarm() => BeginRefresh();
+
+    internal static EditorSoundSampleSnapshot[] CurrentEntries
+    {
+        get
+        {
+            if (buildPhase == BuildPhase.Idle && sortedDirty)
+                RebuildSortedCache();
+            return sortedCache;
+        }
+    }
+
+    private static void BeginBuild(string[] names)
+    {
+        names ??= Array.Empty<string>();
+        if (buildPhase == BuildPhase.Idle && ReferenceEquals(publishedNames, names))
+            return;
+        if (buildPhase != BuildPhase.Idle && ReferenceEquals(requestedNames, names))
+            return;
+
+        requestedNames = names;
+        buildingSamples = new Dictionary<string, EditorSoundSampleSnapshot>(StringComparer.OrdinalIgnoreCase);
+        buildingLoadedAmbientFiles = SoundFileNameCatalog.CurrentLoadedAmbientFiles;
+        buildingLooseAmbientFiles = SoundFileNameCatalog.CurrentLooseAmbientFiles;
+        buildingModAmbientOwners = SoundFileNameCatalog.CurrentModAmbientOwners;
+        buildingOfficialDlcAmbientOwners = SoundFileNameCatalog.CurrentOfficialDlcAmbientOwners;
+        buildSampleIndex = 0;
+        buildPhase = BuildPhase.Samples;
+    }
+
+    internal static bool StepRefresh(double budgetMilliseconds)
+    {
+        if (buildPhase == BuildPhase.Idle) return true;
+        if (budgetMilliseconds <= 0d) return false;
+        long started = Stopwatch.GetTimestamp();
+        do
+        {
+            if (buildPhase == BuildPhase.Samples) StepSampleResolution();
+            else if (buildPhase == BuildPhase.Finalize) PublishBuild();
+            if (buildPhase == BuildPhase.Idle) return true;
+        }
+        while (ElapsedMilliseconds(started) < budgetMilliseconds);
+        return false;
+    }
+
+    internal static EditorSoundSampleSnapshot Resolve(string sample)
+    {
+        if (string.IsNullOrWhiteSpace(sample)) return Missing(sample);
+        if (samples.TryGetValue(sample, out EditorSoundSampleSnapshot known)) return known;
+        if (buildingSamples != null && buildingSamples.TryGetValue(sample, out known)) return known;
+        if (!SoundFileNameCatalog.IsReady || publishedNames == null || buildPhase != BuildPhase.Idle) return Missing(sample);
+        EditorSoundSampleSnapshot resolved = ResolveCore(
+            sample,
+            false,
+            loadedAmbientFiles,
+            looseAmbientFiles,
+            modAmbientOwners,
+            officialDlcAmbientOwners);
+        samples[sample] = resolved;
+        sortedDirty = true;
+        return resolved;
+    }
+
+    internal static void ResetRuntimeState()
+    {
+        samples = new Dictionary<string, EditorSoundSampleSnapshot>(StringComparer.OrdinalIgnoreCase);
+        loadedAmbientFiles = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        looseAmbientFiles = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        modAmbientOwners = new Dictionary<string, ModManager.Mod>(StringComparer.OrdinalIgnoreCase);
+        officialDlcAmbientOwners = new Dictionary<string, ModManager.Mod>(StringComparer.OrdinalIgnoreCase);
+        publishedNames = null;
+        sortedCache = Array.Empty<EditorSoundSampleSnapshot>();
+        sortedDirty = false;
+        requestedNames = null;
+        buildingSamples = null;
+        buildingLoadedAmbientFiles = null;
+        buildingLooseAmbientFiles = null;
+        buildingModAmbientOwners = null;
+        buildingOfficialDlcAmbientOwners = null;
+        buildPhase = BuildPhase.Idle;
+        buildSampleIndex = 0;
+        maxBlockingUnitMilliseconds = 0d;
+        maxBlockingUnit = string.Empty;
+    }
+
+    private static void StepSampleResolution()
+    {
+        string[] names = requestedNames ?? Array.Empty<string>();
+        while (buildSampleIndex < names.Length)
+        {
+            string sample = names[buildSampleIndex++];
+            if (string.IsNullOrWhiteSpace(sample) || buildingSamples.ContainsKey(sample)) return;
+            long started = Stopwatch.GetTimestamp();
+            buildingSamples[sample] = ResolveCore(
+                sample,
+                true,
+                buildingLoadedAmbientFiles,
+                buildingLooseAmbientFiles,
+                buildingModAmbientOwners,
+                buildingOfficialDlcAmbientOwners);
+            RecordBlockingUnit("resolve sample " + sample, ElapsedMilliseconds(started));
+            return;
+        }
+        buildPhase = BuildPhase.Finalize;
+    }
+
+    private static void PublishBuild()
+    {
+        samples = buildingSamples ?? new Dictionary<string, EditorSoundSampleSnapshot>(StringComparer.OrdinalIgnoreCase);
+        loadedAmbientFiles = buildingLoadedAmbientFiles ?? new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        looseAmbientFiles = buildingLooseAmbientFiles ?? new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        modAmbientOwners = buildingModAmbientOwners ?? new Dictionary<string, ModManager.Mod>(StringComparer.OrdinalIgnoreCase);
+        officialDlcAmbientOwners = buildingOfficialDlcAmbientOwners ?? new Dictionary<string, ModManager.Mod>(StringComparer.OrdinalIgnoreCase);
+        publishedNames = requestedNames ?? Array.Empty<string>();
+        sortedDirty = true;
+        RebuildSortedCache();
+        buildingSamples = null;
+        buildingLoadedAmbientFiles = null;
+        buildingLooseAmbientFiles = null;
+        buildingModAmbientOwners = null;
+        buildingOfficialDlcAmbientOwners = null;
+        buildPhase = BuildPhase.Idle;
+    }
+
+    private static void RebuildSortedCache()
+    {
+        long started = Stopwatch.GetTimestamp();
+        sortedCache = new EditorSoundSampleSnapshot[samples.Count];
+        int index = 0;
+        foreach (EditorSoundSampleSnapshot value in samples.Values)
+            sortedCache[index++] = value;
+        Array.Sort(sortedCache, CompareSamples);
+        sortedDirty = false;
+        RecordBlockingUnit("sort sample snapshot", ElapsedMilliseconds(started));
+    }
+
+    private static EditorSoundSampleSnapshot ResolveCore(
+        string sample,
+        bool knownAvailable,
+        Dictionary<string, string> loadedFiles,
+        Dictionary<string, string> looseFiles,
+        Dictionary<string, ModManager.Mod> owners,
+        Dictionary<string, ModManager.Mod> officialOwners)
+    {
+        string resolved = TryResolveAmbientFile(sample, loadedFiles, looseFiles);
+        if (!string.IsNullOrEmpty(resolved))
+        {
+            if (TryIdentifyMod(resolved, owners, out ModManager.Mod mod)) return FromMod(sample, mod);
+            if (TryIdentifyOfficialDlcBySample(sample, officialOwners, out ModManager.Mod officialDlc)) return FromMod(sample, officialDlc);
+            return IsBaseGamePath(resolved) ? Vanilla(sample) : Unknown(sample);
+        }
+        if (knownAvailable)
+        {
+            if (TryIdentifyOfficialDlcBySample(sample, officialOwners, out ModManager.Mod officialDlc)) return FromMod(sample, officialDlc);
+            // The merged catalogue proves availability, not provenance. Do not silently turn a
+            // provenance miss into Vanilla; that is exactly how DLC content was mislabelled.
+            return Unknown(sample);
+        }
+        return Missing(sample);
+    }
+
+    private static EditorSoundSampleSnapshot Missing(string sample) => new()
+    {
+        Sample = sample ?? string.Empty,
+        SourceKind = EditorSoundSourceKind.Missing,
+        SourceName = "Missing",
+        Available = false
+    };
+
+    private static EditorSoundSampleSnapshot Vanilla(string sample) => new()
+    {
+        Sample = sample,
+        SourceKind = EditorSoundSourceKind.Vanilla,
+        SourceName = "Vanilla",
+        SourceId = string.Empty,
+        Available = true
+    };
+
+    private static EditorSoundSampleSnapshot Unknown(string sample) => new()
+    {
+        Sample = sample ?? string.Empty,
+        SourceKind = EditorSoundSourceKind.Unknown,
+        SourceName = "Unknown",
+        SourceId = string.Empty,
+        Available = true
+    };
+
+    private static EditorSoundSampleSnapshot FromMod(string sample, ModManager.Mod mod)
+    {
+        string id = mod?.id ?? string.Empty;
+        EditorSoundSourceKind kind = ClassifyMod(id);
+        string name = kind switch
+        {
+            EditorSoundSourceKind.Downpour => "Downpour",
+            EditorSoundSourceKind.Watcher => "Watcher",
+            _ => SafeModName(mod)
+        };
+        return new EditorSoundSampleSnapshot
+        {
+            Sample = sample,
+            SourceKind = kind,
+            SourceName = name,
+            SourceId = id,
+            Available = true
+        };
+    }
+
+    private static EditorSoundSourceKind ClassifyMod(string id)
+    {
+        if (string.Equals(id, DownpourModId, StringComparison.OrdinalIgnoreCase)) return EditorSoundSourceKind.Downpour;
+        if (string.Equals(id, WatcherModId, StringComparison.OrdinalIgnoreCase)) return EditorSoundSourceKind.Watcher;
+        return EditorSoundSourceKind.Mod;
+    }
+
+    private static string TryResolveAmbientFile(
+        string sample,
+        Dictionary<string, string> loadedFiles,
+        Dictionary<string, string> looseFiles)
+    {
+        string key = SampleKey(sample);
+        if (string.IsNullOrEmpty(key)) return string.Empty;
+        if (loadedFiles != null && loadedFiles.TryGetValue(key, out string loadedPath)) return loadedPath;
+        if (looseFiles != null && looseFiles.TryGetValue(key, out string loosePath)) return loosePath;
+        return string.Empty;
+    }
+
+    private static bool TryIdentifyMod(
+        string filePath,
+        Dictionary<string, ModManager.Mod> owners,
+        out ModManager.Mod owner)
+    {
+        owner = null;
+        if (string.IsNullOrEmpty(filePath)) return false;
+        if (SoundModPathLookup.TryFind(filePath, out owner)) return true;
+        if (!IsMergedModsPath(filePath)) return false;
+        string key = SampleKey(filePath);
+        return !string.IsNullOrEmpty(key) && owners != null && owners.TryGetValue(key, out owner);
+    }
+
+    private static bool TryIdentifyOfficialDlcBySample(
+        string sample,
+        Dictionary<string, ModManager.Mod> officialOwners,
+        out ModManager.Mod owner)
+    {
+        string key = SampleKey(sample);
+        if (!string.IsNullOrEmpty(key) && officialOwners != null && officialOwners.TryGetValue(key, out owner))
+            return true;
+        owner = null;
+        return false;
+    }
+
+    private static string SampleKey(string value)
+    {
+        if (string.IsNullOrWhiteSpace(value)) return string.Empty;
+        try { return Path.GetFileName(value.Trim()) ?? string.Empty; }
+        catch { return value.Trim(); }
+    }
+
+    private static bool IsBaseGamePath(string path)
+    {
+        if (string.IsNullOrWhiteSpace(path)) return false;
+        // The local LoadedSoundEffects tree is a genuine base-game source. Resolved loose paths
+        // outside every active mod and outside mergedmods are likewise base-game assets.
+        if (path.StartsWith("./Assets/", StringComparison.OrdinalIgnoreCase) ||
+            path.StartsWith(".\\Assets\\", StringComparison.OrdinalIgnoreCase))
+            return true;
+        if (IsMergedModsPath(path)) return false;
+        // ResolveCore has already checked every active mod with the same resolved path.
+        return true;
+    }
+
+    private static bool IsMergedModsPath(string path)
+    {
+        if (string.IsNullOrWhiteSpace(path)) return false;
+        string normalized = path.Replace(Path.AltDirectorySeparatorChar, Path.DirectorySeparatorChar);
+        string marker = Path.DirectorySeparatorChar + "mergedmods" + Path.DirectorySeparatorChar;
+        return normalized.IndexOf(marker, StringComparison.OrdinalIgnoreCase) >= 0;
+    }
+
+    private static string SafeModName(ModManager.Mod mod)
+    {
+        if (mod == null) return "Mod";
+        try
+        {
+            string localized = mod.LocalizedName;
+            if (!string.IsNullOrWhiteSpace(localized)) return localized;
+        }
+        catch { }
+        if (!string.IsNullOrWhiteSpace(mod.name)) return mod.name;
+        if (!string.IsNullOrWhiteSpace(mod.id)) return mod.id;
+        return "Mod";
+    }
+
+    private static int CompareSamples(EditorSoundSampleSnapshot a, EditorSoundSampleSnapshot b)
+    {
+        int kind = a.SourceKind.CompareTo(b.SourceKind);
+        if (kind != 0) return kind;
+        int source = string.Compare(a.SourceName, b.SourceName, StringComparison.OrdinalIgnoreCase);
+        return source != 0 ? source : string.Compare(a.Sample, b.Sample, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static float SampleProgress()
+    {
+        int total = requestedNames?.Length ?? 0;
+        return total <= 0 ? 1f : Math.Max(0f, Math.Min(1f, buildSampleIndex / (float)total));
+    }
+
+    private static void RecordBlockingUnit(string label, double milliseconds)
+    {
+        if (milliseconds <= maxBlockingUnitMilliseconds) return;
+        maxBlockingUnitMilliseconds = milliseconds;
+        maxBlockingUnit = label ?? string.Empty;
+    }
+
+    private static double ElapsedMilliseconds(long startedTimestamp) =>
+        (Stopwatch.GetTimestamp() - startedTimestamp) * 1000d / Stopwatch.Frequency;
+}

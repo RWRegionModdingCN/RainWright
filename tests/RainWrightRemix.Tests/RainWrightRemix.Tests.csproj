@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>disable</Nullable>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="../../src/Rainwright/Game/Remix/*.cs" Link="Production/%(Filename)%(Extension)" />
+    <Compile Include="../../src/Rainwright/Game/DevTool/Personalization/RainWrightAboutPage.cs" Link="Production/RainWrightAboutPage.cs" />
+    <Compile Include="../../src/Rainwright/Game/DevTool/Personalization/RainWrightOptions.cs" Link="Production/RainWrightOptions.cs" />
+    <Compile Include="../../src/Rainwright/Backend/Settings/RainWrightPersonalSettings.cs" Link="Production/RainWrightPersonalSettings.cs" />
+    <Compile Include="../../src/Rainwright/Runtime/FrontendHookLedger.cs" Link="Production/FrontendHookLedger.cs" />
+  </ItemGroup>
+  <ItemGroup><Compile Include="../../src/Rainwright/Backend/Core/EditorBackupFiles.cs" Link="Production/EditorBackupFiles.cs" /></ItemGroup>
+</Project>

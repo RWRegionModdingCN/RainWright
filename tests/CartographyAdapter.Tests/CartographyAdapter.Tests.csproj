@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <LangVersion>13</LangVersion>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+  </PropertyGroup>
+  <ItemGroup>
+    <!-- Test the actual gameplay-facing adapter compiled against the actual
+         Rainwright DLL, rather than re-linking the command engine source. -->
+    <ProjectReference Include="../../src/Rainwright/Rainwright.csproj" />
+    <Compile Include="../../src/Rainwright/Game/DevTool/Map/Cartography/CartographyEditing.cs"
+             Link="Production/CartographyEditing.cs" />
+    <Compile Include="../../src/Rainwright/Game/DevTool/Map/Cartography/CartographyRouteEditing.cs"
+             Link="Production/CartographyRouteEditing.cs" />
+    <Compile Include="../../src/Rainwright/Game/DevTool/Map/Cartography/CartographyComposition.cs"
+             Link="Production/CartographyComposition.cs" />
+    <Compile Include="../../src/Rainwright/Game/DevTool/Map/Cartography/CartographySceneCache.cs"
+             Link="Production/CartographySceneCache.cs" />
+  </ItemGroup>
+</Project>

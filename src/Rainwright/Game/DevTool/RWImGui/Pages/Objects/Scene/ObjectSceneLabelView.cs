@@ -1,0 +1,478 @@
+using System;
+using System.Collections.Generic;
+using DryCycle.DevUI.DevTool.Core;
+using ImGuiNET;
+using Num = System.Numerics;
+
+namespace DryCycle.DevUI.DevTool.RWImGui;
+
+internal static class ObjectSceneLabelView
+{
+    private const float PaddingX = 6f;
+    private const float PaddingY = 3f;
+    private const float Gap = 3f;
+    private const float HitPadding = 4f;
+    private const double HoverDelaySeconds = 0.12;
+    private const float SpatialCellSize = 96f;
+    private const float PanReuseFraction = 0.30f;
+
+    private sealed class Label
+    {
+        internal EditorObjectSnapshot Item;
+        internal string Text;
+        internal Num.Vector2 Anchor;
+        internal Num.Vector2 Min;
+        internal Num.Vector2 Max;
+        internal ObjectSceneVisibility Visibility;
+        internal int Priority;
+    }
+
+    private static readonly List<Label> labels = new();
+    private static readonly List<Label> placed = new();
+    private static readonly Dictionary<long, List<Label>> occupancy = new();
+    private static EditorObjectSnapshot[] cachedObjects;
+    private static long cachedVisibilityRevision = -1;
+    private static float cameraX = float.NaN;
+    private static float cameraY = float.NaN;
+    private static float cameraWidth = float.NaN;
+    private static float cameraHeight = float.NaN;
+    private static Num.Vector2 cachedDisplay;
+    private static long hoveredStableId;
+    private static long pendingHoverStableId;
+    private static double pendingHoverSince;
+
+    internal static bool OwnsMouse { get; private set; }
+
+    internal static void Draw(EditorPresentationSnapshot snapshot, Num.Vector2 display)
+    {
+        OwnsMouse = false;
+        EditorViewportSnapshot viewport = EditorViewportPresentationHub.Current;
+        if (snapshot == null || snapshot.ToolMode != EditorToolMode.Objects || snapshot.PlacementActive ||
+            viewport?.Available != true || display.X <= 1f || display.Y <= 1f)
+        {
+            SetHover(-1);
+            return;
+        }
+
+        EnsureLayout(snapshot.SceneObjects ?? Array.Empty<EditorObjectSnapshot>(), viewport, display);
+        Num.Vector2 layoutDelta = LayoutToCurrentDelta(viewport, display);
+
+        ImGuiIOPtr io = ImGui.GetIO();
+        bool pointerBlocked =
+            io.WantCaptureMouse ||
+            FloatingWindowSnap.OwnsMouse ||
+            NativeObjectGizmoView.OwnsMouse ||
+            NativeSpatialGizmoView.OwnsMouse ||
+            ObjectMarqueeSelectionView.OwnsMouse;
+        Label hit = pointerBlocked
+            ? null
+            : HitTest(io.MousePos - layoutDelta);
+        UpdateHover(hit?.Item.StableId ?? 0L);
+
+        ImDrawListPtr draw = ImGui.GetBackgroundDrawList();
+        for (int i = 0; i < placed.Count; i++)
+        {
+            Label label = placed[i];
+            if (!IntersectsDisplay(label, layoutDelta, display))
+                continue;
+            DrawLabel(draw, label, layoutDelta);
+        }
+
+        if (hit == null || pointerBlocked || !ImGui.IsMouseClicked(ImGuiMouseButton.Left))
+            return;
+
+        OwnsMouse = true;
+        EditorUiCommandQueue.Enqueue(new EditorUiCommand(
+            io.KeyCtrl ? EditorUiCommandKind.ToggleObjectSelection : EditorUiCommandKind.SelectObject,
+            index: hit.Item.Index,
+            stableId: hit.Item.StableId));
+    }
+
+    internal static void ResetRetainedState()
+    {
+        labels.Clear();
+        placed.Clear();
+        occupancy.Clear();
+        cachedObjects = null;
+        cachedVisibilityRevision = -1;
+        cameraX = cameraY = cameraWidth = cameraHeight = float.NaN;
+        cachedDisplay = default;
+        hoveredStableId = 0L;
+        pendingHoverStableId = 0L;
+        pendingHoverSince = 0d;
+        ObjectSceneVisibilityState.SetHoveredStableId(0L);
+        OwnsMouse = false;
+    }
+
+    private static void EnsureLayout(EditorObjectSnapshot[] objects, EditorViewportSnapshot viewport, Num.Vector2 display)
+    {
+        long revision = ObjectSceneVisibilityState.Revision;
+        bool projectionStable =
+            ReferenceEquals(cachedObjects, objects) &&
+            cachedVisibilityRevision == revision &&
+            Nearly(cameraWidth, viewport.Width) &&
+            Nearly(cameraHeight, viewport.Height) &&
+            Nearly(cachedDisplay.X, display.X) &&
+            Nearly(cachedDisplay.Y, display.Y);
+
+        if (projectionStable &&
+            Math.Abs(cameraX - viewport.CameraX) <= viewport.Width * PanReuseFraction &&
+            Math.Abs(cameraY - viewport.CameraY) <= viewport.Height * PanReuseFraction)
+            return;
+
+        ObjectSceneProjectionPolicy.Update(viewport, display);
+
+        labels.Clear();
+        placed.Clear();
+        occupancy.Clear();
+        for (int i = 0; i < objects.Length; i++)
+        {
+            EditorObjectSnapshot item = objects[i];
+            if (item == null) continue;
+            ObjectSceneVisibility visibility = ObjectSceneVisibilityState.Resolve(item);
+            if (!ObjectSceneProjectionPolicy.ShouldPresent(item, visibility))
+                continue;
+
+            Num.Vector2 anchor = WorldToScreen(item.X, item.Y, viewport, display);
+            float marginX = display.X * PanReuseFraction + 120f;
+            float marginY = display.Y * PanReuseFraction + 40f;
+            if (anchor.X < -marginX || anchor.X > display.X + marginX ||
+                anchor.Y < -marginY || anchor.Y > display.Y + marginY)
+                continue;
+
+            string text = string.IsNullOrWhiteSpace(item.DisplayName) ? item.Type : item.DisplayName;
+            Num.Vector2 size = ImGui.CalcTextSize(text) + new Num.Vector2(PaddingX * 2f, PaddingY * 2f);
+            labels.Add(new Label
+            {
+                Item = item,
+                Text = text,
+                Anchor = anchor,
+                Min = anchor,
+                Max = anchor + size,
+                Visibility = visibility,
+                Priority = Priority(item, visibility)
+            });
+        }
+
+        labels.Sort((a, b) =>
+        {
+            int p = b.Priority.CompareTo(a.Priority);
+            return p != 0 ? p : CompareStableIdentity(a.Item, b.Item);
+        });
+
+        for (int i = 0; i < labels.Count; i++)
+        {
+            Place(labels[i], display);
+            placed.Add(labels[i]);
+            RegisterOccupancy(labels[i]);
+        }
+
+        placed.Sort((a, b) =>
+        {
+            int p = a.Priority.CompareTo(b.Priority);
+            return p != 0 ? p : CompareStableIdentity(a.Item, b.Item);
+        });
+
+        cachedObjects = objects;
+        cachedVisibilityRevision = revision;
+        cameraX = viewport.CameraX;
+        cameraY = viewport.CameraY;
+        cameraWidth = viewport.Width;
+        cameraHeight = viewport.Height;
+        cachedDisplay = display;
+    }
+
+    private static void Place(Label label, Num.Vector2 display)
+    {
+        Num.Vector2 size = label.Max - label.Min;
+        bool clampToViewport =
+            label.Anchor.X >= 0f && label.Anchor.X <= display.X &&
+            label.Anchor.Y >= 0f && label.Anchor.Y <= display.Y;
+
+        for (int i = 0; i < 8; i++)
+        {
+            Num.Vector2 min = label.Anchor + PlacementOffset(i, size);
+            Num.Vector2 max = min + size;
+            if (clampToViewport)
+                Clamp(ref min, ref max, display);
+            if (!Overlaps(min, max))
+            {
+                label.Min = min;
+                label.Max = max;
+                return;
+            }
+        }
+
+        Num.Vector2 fallbackMin = label.Anchor + new Num.Vector2(8f, 8f);
+        Num.Vector2 fallbackMax = fallbackMin + size;
+        for (int row = 0; row < 16; row++)
+        {
+            Num.Vector2 min = label.Anchor + new Num.Vector2(8f, 8f + row * (size.Y + Gap));
+            Num.Vector2 max = min + size;
+            if (clampToViewport)
+                Clamp(ref min, ref max, display);
+            fallbackMin = min;
+            fallbackMax = max;
+            if (!Overlaps(min, max))
+            {
+                label.Min = min;
+                label.Max = max;
+                return;
+            }
+        }
+
+        // Dense scenes can exhaust the bounded search before the dedicated cluster phase runs.
+        // Keep a deterministic clamped fallback instead of silently leaving the label at its raw
+        // anchor, which would create an accidental pile-up with no relationship to layout policy.
+        label.Min = fallbackMin;
+        label.Max = fallbackMax;
+    }
+
+    private static Num.Vector2 PlacementOffset(int index, Num.Vector2 size) => index switch
+    {
+        0 => new Num.Vector2(8f, -size.Y * 0.5f),
+        1 => new Num.Vector2(8f, 8f),
+        2 => new Num.Vector2(8f, -size.Y - 8f),
+        3 => new Num.Vector2(-size.X - 8f, -size.Y * 0.5f),
+        4 => new Num.Vector2(-size.X - 8f, 8f),
+        5 => new Num.Vector2(-size.X - 8f, -size.Y - 8f),
+        6 => new Num.Vector2(-size.X * 0.5f, 10f),
+        _ => new Num.Vector2(-size.X * 0.5f, -size.Y - 10f)
+    };
+
+    private static Label HitTest(Num.Vector2 point)
+    {
+        if (!occupancy.TryGetValue(CellKey(Cell(point.X), Cell(point.Y)), out List<Label> bucket))
+            return null;
+
+        Label best = null;
+        int bestPriority = int.MinValue;
+        for (int i = 0; i < bucket.Count; i++)
+        {
+            Label candidate = bucket[i];
+            if (!ObjectSceneProjectionPolicy.IsInteractive(candidate.Item) ||
+                !Contains(candidate, point, HitPadding) ||
+                candidate.Priority < bestPriority)
+                continue;
+
+            best = candidate;
+            bestPriority = candidate.Priority;
+        }
+        return best;
+    }
+
+    private static bool Overlaps(Num.Vector2 min, Num.Vector2 max)
+    {
+        int minCellX = Cell(min.X - Gap);
+        int maxCellX = Cell(max.X + Gap);
+        int minCellY = Cell(min.Y - Gap);
+        int maxCellY = Cell(max.Y + Gap);
+
+        for (int y = minCellY; y <= maxCellY; y++)
+        {
+            for (int x = minCellX; x <= maxCellX; x++)
+            {
+                if (!occupancy.TryGetValue(CellKey(x, y), out List<Label> bucket))
+                    continue;
+
+                for (int i = 0; i < bucket.Count; i++)
+                {
+                    Label other = bucket[i];
+                    if (max.X + Gap < other.Min.X || min.X - Gap > other.Max.X ||
+                        max.Y + Gap < other.Min.Y || min.Y - Gap > other.Max.Y)
+                        continue;
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    private static void RegisterOccupancy(Label label)
+    {
+        float indexPadding = Math.Max(Gap, HitPadding);
+        int minCellX = Cell(label.Min.X - indexPadding);
+        int maxCellX = Cell(label.Max.X + indexPadding);
+        int minCellY = Cell(label.Min.Y - indexPadding);
+        int maxCellY = Cell(label.Max.Y + indexPadding);
+
+        for (int y = minCellY; y <= maxCellY; y++)
+        {
+            for (int x = minCellX; x <= maxCellX; x++)
+            {
+                long key = CellKey(x, y);
+                if (!occupancy.TryGetValue(key, out List<Label> bucket))
+                {
+                    bucket = new List<Label>(4);
+                    occupancy.Add(key, bucket);
+                }
+                bucket.Add(label);
+            }
+        }
+    }
+
+    private static int Cell(float value) => (int)Math.Floor(value / SpatialCellSize);
+
+    private static long CellKey(int x, int y) => ((long)x << 32) ^ (uint)y;
+
+    private static bool IntersectsDisplay(Label label, Num.Vector2 layoutDelta, Num.Vector2 display)
+    {
+        Num.Vector2 min = label.Min + layoutDelta;
+        Num.Vector2 max = label.Max + layoutDelta;
+        return max.X >= 0f && min.X <= display.X && max.Y >= 0f && min.Y <= display.Y;
+    }
+
+    private static void DrawLabel(ImDrawListPtr draw, Label label, Num.Vector2 layoutDelta)
+    {
+        ObjectSceneVisibility visibility = ObjectSceneVisibilityState.Resolve(label.Item);
+        float alpha = visibility switch
+        {
+            ObjectSceneVisibility.Ghost => 0.24f,
+            ObjectSceneVisibility.Normal => 0.72f,
+            ObjectSceneVisibility.Hovered => 1f,
+            ObjectSceneVisibility.Selected => 1f,
+            _ => 0f
+        };
+        if (alpha <= 0f) return;
+
+        bool strong = visibility is ObjectSceneVisibility.Hovered or ObjectSceneVisibility.Selected;
+        float backgroundAlpha = strong
+            ? 0.82f
+            : visibility == ObjectSceneVisibility.Normal
+                ? 0.16f
+                : 0.05f;
+        float borderAlpha = strong
+            ? 0.92f
+            : visibility == ObjectSceneVisibility.Normal
+                ? 0.08f
+                : 0f;
+        float leaderAlpha = strong
+            ? 0.58f
+            : visibility == ObjectSceneVisibility.Normal
+                ? 0.09f
+                : 0.03f;
+
+        uint bg = ImGui.ColorConvertFloat4ToU32(
+            new Num.Vector4(0.035f, 0.045f, 0.055f, backgroundAlpha));
+        uint border = ImGui.ColorConvertFloat4ToU32(
+            new Num.Vector4(0.55f, 0.76f, 0.92f, borderAlpha));
+        uint text = ImGui.ColorConvertFloat4ToU32(
+            new Num.Vector4(0.92f, 0.95f, 0.98f, alpha));
+        uint leader = ImGui.ColorConvertFloat4ToU32(
+            new Num.Vector4(0.68f, 0.78f, 0.88f, leaderAlpha));
+
+        Num.Vector2 anchor = label.Anchor + layoutDelta;
+        Num.Vector2 min = label.Min + layoutDelta;
+        Num.Vector2 max = label.Max + layoutDelta;
+        Num.Vector2 nearest = new(
+            Math.Max(min.X, Math.Min(anchor.X, max.X)),
+            Math.Max(min.Y, Math.Min(anchor.Y, max.Y)));
+
+        draw.AddLine(anchor, nearest, leader, strong ? 1.2f : 1f);
+        if (backgroundAlpha > 0f)
+            draw.AddRectFilled(min, max, bg, 4f);
+        if (borderAlpha > 0f)
+            draw.AddRect(min, max, border, 4f, ImDrawFlags.None, strong ? 1.2f : 1f);
+        draw.AddText(min + new Num.Vector2(PaddingX, PaddingY), text, label.Text);
+    }
+
+    private static int CompareStableIdentity(EditorObjectSnapshot a, EditorObjectSnapshot b)
+    {
+        long aId = a?.StableId ?? 0L;
+        long bId = b?.StableId ?? 0L;
+        if (aId != 0L || bId != 0L)
+        {
+            int stable = aId.CompareTo(bId);
+            if (stable != 0) return stable;
+        }
+        return (a?.Index ?? -1).CompareTo(b?.Index ?? -1);
+    }
+
+    private static int Priority(EditorObjectSnapshot item, ObjectSceneVisibility visibility)
+    {
+        int state = visibility switch
+        {
+            ObjectSceneVisibility.Selected => 4000,
+            ObjectSceneVisibility.Hovered => 3000,
+            ObjectSceneVisibility.Normal => 2000,
+            ObjectSceneVisibility.Ghost => 1000,
+            _ => 0
+        };
+        return state + Math.Max(-100, Math.Min(100, item.Importance));
+    }
+
+    private static bool Contains(Label label, Num.Vector2 p, float padding) =>
+        p.X >= label.Min.X - padding && p.X <= label.Max.X + padding &&
+        p.Y >= label.Min.Y - padding && p.Y <= label.Max.Y + padding;
+
+    private static void Clamp(ref Num.Vector2 min, ref Num.Vector2 max, Num.Vector2 display)
+    {
+        Num.Vector2 size = max - min;
+        min.X = Math.Max(2f, Math.Min(Math.Max(2f, display.X - size.X - 2f), min.X));
+        min.Y = Math.Max(2f, Math.Min(Math.Max(2f, display.Y - size.Y - 2f), min.Y));
+        max = min + size;
+    }
+
+    private static Num.Vector2 LayoutToCurrentDelta(EditorViewportSnapshot viewport, Num.Vector2 display)
+    {
+        if (float.IsNaN(cameraX) || float.IsNaN(cameraY))
+            return default;
+
+        float scaleX = display.X / Math.Max(1f, viewport.Width);
+        float scaleY = display.Y / Math.Max(1f, viewport.Height);
+        return new Num.Vector2(
+            (cameraX - viewport.CameraX) * scaleX,
+            (viewport.CameraY - cameraY) * scaleY);
+    }
+
+    private static Num.Vector2 WorldToScreen(float x, float y, EditorViewportSnapshot viewport, Num.Vector2 display)
+    {
+        float nx = (x - viewport.CameraX) / Math.Max(1f, viewport.Width);
+        float ny = (y - viewport.CameraY) / Math.Max(1f, viewport.Height);
+        return new Num.Vector2(nx * display.X, display.Y - ny * display.Y);
+    }
+
+    private static void UpdateHover(long stableId)
+    {
+        if (stableId == 0L)
+        {
+            pendingHoverStableId = 0L;
+            pendingHoverSince = 0d;
+            SetHover(0L);
+            return;
+        }
+
+        if (stableId == hoveredStableId)
+        {
+            pendingHoverStableId = 0L;
+            return;
+        }
+
+        double now = ImGui.GetTime();
+        if (pendingHoverStableId != stableId)
+        {
+            // Do not leave the previous label visually hot while the pointer settles on another
+            // candidate. The new candidate still waits for the debounce before expanding.
+            if (hoveredStableId != 0L)
+                SetHover(0L);
+            pendingHoverStableId = stableId;
+            pendingHoverSince = now;
+            return;
+        }
+
+        if (now - pendingHoverSince < HoverDelaySeconds)
+            return;
+
+        pendingHoverStableId = 0L;
+        SetHover(stableId);
+    }
+
+    private static void SetHover(long stableId)
+    {
+        if (hoveredStableId == stableId) return;
+        hoveredStableId = stableId;
+        ObjectSceneVisibilityState.SetHoveredStableId(stableId);
+    }
+
+    private static bool Nearly(float a, float b) => Math.Abs(a - b) <= 0.01f;
+}

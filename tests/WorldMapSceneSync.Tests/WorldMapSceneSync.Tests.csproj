@@ -1,0 +1,24 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType><LangVersion>13</LangVersion>
+    <TargetFramework Condition="'$(RainwrightGameMonoRegression)' != 'true'">net10.0</TargetFramework>
+    <TargetFramework Condition="'$(RainwrightGameMonoRegression)' == 'true'">net48</TargetFramework>
+    <Nullable>disable</Nullable><ImplicitUsings>disable</ImplicitUsings>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="../../src/Rainwright/Backend/Presentation/EditorMapSnapshots.cs" Link="Production/EditorMapSnapshots.cs" />
+    <Compile Include="../../src/Rainwright/Backend/World/WorldConnectionDirection.cs" Link="Production/WorldConnectionDirection.cs" />
+    <Compile Include="../../src/Rainwright/Runtime/WorldMap/WorldMapDirtySet.cs" Link="Production/WorldMapDirtySet.cs" />
+    <Compile Include="../../src/Rainwright/Runtime/WorldMap/MapDepthProjection.cs" Link="Production/MapDepthProjection.cs" />
+    <Compile Include="../../src/Rainwright/Runtime/WorldMap/WorldMapViewTransform.cs" Link="Production/WorldMapViewTransform.cs" />
+    <Compile Include="../../src/Rainwright/Runtime/WorldMap/WorldMapViewTransformMailbox.cs" Link="Production/WorldMapViewTransformMailbox.cs" />
+    <Compile Include="../../src/Rainwright/Game/DevTool/RWImGui/Pages/World/WorldMap/RetainedV2/Core/WorldMapScene.cs" Link="Production/WorldMapScene.cs" />
+    <Compile Include="../../src/Rainwright/Game/DevTool/RWImGui/Pages/World/WorldMap/RetainedV2/Core/WorldMapSceneSynchronizer.cs" Link="Production/WorldMapSceneSynchronizer.cs" />
+    <Compile Include="../../src/Rainwright/Game/DevTool/RWImGui/Pages/World/WorldMap/RetainedV2/Core/WorldMapSceneDelta.cs" Link="Production/WorldMapSceneDelta.cs" />
+  </ItemGroup>
+  <ItemGroup Condition="'$(RainwrightGameMonoRegression)' == 'true'">
+    <PackageReference Include="Microsoft.NETFramework.ReferenceAssemblies.net48" Version="1.0.3" PrivateAssets="all" />
+    <PackageReference Include="PolySharp" Version="1.15.0" PrivateAssets="all" />
+    <Reference Include="System.Numerics" />
+  </ItemGroup>
+</Project>

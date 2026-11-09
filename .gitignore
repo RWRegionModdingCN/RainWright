@@ -1,0 +1,13 @@
+artifacts/
+bin/
+obj/
+.vs/
+.idea/
+.vscode/
+*.user
+*.suo
+Directory.Build.local.props
+mod/newest/plugins/*.dll
+mod/newest/plugins/*.pdb
+.DS_Store
+Thumbs.db

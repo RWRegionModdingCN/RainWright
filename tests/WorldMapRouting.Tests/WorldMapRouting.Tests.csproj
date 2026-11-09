@@ -1,0 +1,31 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework Condition="'$(RainwrightGameMonoRegression)' != 'true'">net10.0</TargetFramework>
+    <TargetFramework Condition="'$(RainwrightGameMonoRegression)' == 'true'">net48</TargetFramework>
+    <LangVersion>13</LangVersion>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <NoWarn>$(NoWarn);CS0649</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="../../src/Rainwright/Runtime/WorldMap/WorldMapOrthogonalRouter.cs"
+             Link="Production/WorldMapOrthogonalRouter.cs" />
+    <Compile Include="../../src/Rainwright/Runtime/WorldMap/WorldMapVisibilityRouter.cs" Link="Production/WorldMapVisibilityRouter.cs" />
+    <Compile Include="../../src/Rainwright/Runtime/WorldMap/WorldMapJunctionWeavePlanner.cs"
+             Link="Production/WorldMapJunctionWeavePlanner.cs" />
+    <Compile Include="../../src/Rainwright/Runtime/WorldMap/WorldMapRouteSpatialCore.cs"
+             Link="Production/WorldMapRouteSpatialCore.cs" />
+    <Compile Include="../../src/Rainwright/Runtime/WorldMap/WorldMapRouteCrossingCore.cs" Link="Production/WorldMapRouteCrossingCore.cs" />
+    <Compile Include="../../src/Rainwright/Backend/World/WorldConnectionDirection.cs" Link="Production/WorldConnectionDirection.cs" />
+    <Compile Include="../../src/Rainwright/Game/DevTool/RWImGui/Pages/World/WorldMap/RetainedV2/Connections/ConnectionRouteResource.cs" Link="Production/ConnectionRouteResource.cs" />
+    <Compile Include="../../src/Rainwright/Game/DevTool/RWImGui/Pages/World/WorldMap/RetainedV2/Connections/WorldMapCorridorLaneAllocator.cs" Link="Production/WorldMapCorridorLaneAllocator.cs" />
+    <Compile Include="../../src/Rainwright/Game/DevTool/RWImGui/Pages/World/WorldMap/RetainedV2/Connections/WorldMapRouteCrossingResolver.cs" Link="Production/WorldMapRouteCrossingResolver.cs" />
+  </ItemGroup>
+  <ItemGroup Condition="'$(RainwrightGameMonoRegression)' == 'true'">
+    <PackageReference Include="Microsoft.NETFramework.ReferenceAssemblies.net48" Version="1.0.3" PrivateAssets="all" />
+    <PackageReference Include="PolySharp" Version="1.15.0" PrivateAssets="all" />
+    <Reference Include="System.Numerics" />
+  </ItemGroup>
+</Project>

@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup><OutputType>Exe</OutputType><TargetFramework>net10.0</TargetFramework><LangVersion>13</LangVersion><ImplicitUsings>disable</ImplicitUsings><Nullable>disable</Nullable></PropertyGroup>
+  <ItemGroup>
+    <Compile Include="../../src/Rainwright/Game/DevTool/Map/PlayerMap/RoomMapBakePipeline.cs" Link="Production/RoomMapBakePipeline.cs" />
+    <Compile Include="../../src/Rainwright/Game/DevTool/Map/PlayerMap/PlayerMapTerrainBakeBridge.cs" Link="Production/PlayerMapTerrainBakeBridge.cs" />
+    <Compile Include="../../src/Rainwright/Game/DevTool/Map/PlayerMap/PlayerMapPreflightDiagnostics.cs" Link="Production/PlayerMapPreflightDiagnostics.cs" />
+    <Compile Include="../../src/Rainwright/Backend/Map/RoomMapGeometry.cs" Link="Production/RoomMapGeometry.cs" />
+    <Compile Include="../../src/Rainwright/Backend/Map/PlayerMapPreflightCore.cs" Link="Production/PlayerMapPreflightCore.cs" />
+    <Compile Include="../../src/Rainwright/Backend/Map/PlayerMapCoordinatePolicy.cs" Link="Production/PlayerMapCoordinatePolicy.cs" />
+    <Compile Include="../../src/Rainwright/Backend/Map/MapRoomLayer.cs" Link="Production/MapRoomLayer.cs" />
+    <Compile Include="../../src/Rainwright/Backend/Presentation/RoomMapBakeSnapshots.cs" Link="Production/RoomMapBakeSnapshots.cs" />
+    <Compile Include="../../src/Rainwright/Backend/Presentation/PlayerMapRenderPresentation.cs" Link="Production/PlayerMapRenderPresentation.cs" />
+  </ItemGroup>
+</Project>

@@ -1,0 +1,451 @@
+using System;
+using System.Collections.Generic;
+using DryCycle.DevUI.DevTool.Core;
+using BepInEx.Logging;
+using DryCycle.DevUI.DevTool.Map;
+using DryCycle.DevUI.DevTool.Map.PlayerMap;
+using ImGuiNET;
+using UnityEngine;
+using Num = System.Numerics;
+
+namespace DryCycle.DevUI.DevTool.RWImGui;
+
+/// <summary>
+/// Group layer controls for the Player Map selection model. The UI only collects the current
+/// selection and enqueues one backend PlayerMapGroupLayerCommand; layer mutation/history remains
+/// authoritative in PlayerMapWorkspaceRuntime + PlayerMapGroupCommandRuntime.
+/// </summary>
+internal static class PlayerMapGroupLayerControls
+{
+    private static bool enabled;
+
+    internal static void Enable(ManualLogSource logger)
+    {
+        if (enabled) return;
+        enabled = PlayerMapSelectionAccess.Available;
+        if (enabled)
+            logger?.LogInfo("Player Map grouped layer controls enabled through direct view calls; no self-detour attached.");
+        else
+            logger?.LogWarning("Player Map grouped layer controls disabled because selection adapter is unavailable.");
+    }
+
+    internal static void Disable() => enabled = false;
+
+    internal static void DrawToolbar(PlayerMapPresentationSnapshot snapshot)
+    {
+        if (!enabled || snapshot?.Available != true) return;
+
+        List<PlayerMapRoomSnapshot> selected = PlayerMapSelectionAccess.Collect(snapshot);
+        if (selected.Count == 0) return;
+
+        ImGui.SameLine(0f, 12f);
+        ImGui.TextDisabled("Layer");
+        for (int layer = 0; layer < PlayerMapCoordinateSystem.LayerCount; layer++)
+        {
+            ImGui.SameLine(0f, layer == 0 ? 5f : 3f);
+            bool allOnLayer = true;
+            for (int i = 0; i < selected.Count; i++)
+            {
+                if (selected[i].Layer == layer) continue;
+                allOnLayer = false;
+                break;
+            }
+
+            if (DevToolWidgets.ActionButton(
+                    MapRoomLayer.Label(layer),
+                    "PlayerMapGroupLayer" + layer,
+                    allOnLayer ? DevToolButtonTone.Primary : DevToolButtonTone.Subtle))
+                QueueLayerChange(selected, layer);
+        }
+    }
+
+    internal static void HandleShortcuts(
+        PlayerMapPresentationSnapshot snapshot,
+        bool canvasHovered,
+        ImGuiIOPtr io)
+    {
+        if (!enabled || snapshot?.Available != true || !canvasHovered ||
+            ImGui.IsAnyItemActive() || io.WantTextInput || io.KeyCtrl || io.KeyAlt ||
+            ImGui.IsMouseDown(ImGuiMouseButton.Left))
+            return;
+
+        int target = -1;
+        string keys = string.Empty;
+        if (UnityEngine.Input.GetKeyDown(KeyCode.Alpha1) || UnityEngine.Input.GetKeyDown(KeyCode.Keypad1))
+        {
+            target = 0;
+            keys = "1";
+        }
+        else if (UnityEngine.Input.GetKeyDown(KeyCode.Alpha2) || UnityEngine.Input.GetKeyDown(KeyCode.Keypad2))
+        {
+            target = 1;
+            keys = "2";
+        }
+        else if (UnityEngine.Input.GetKeyDown(KeyCode.Alpha3) || UnityEngine.Input.GetKeyDown(KeyCode.Keypad3))
+        {
+            target = 2;
+            keys = "3";
+        }
+        if (target < 0) return;
+
+        List<PlayerMapRoomSnapshot> selected =
+            PlayerMapSelectionAccess.Collect(snapshot);
+        bool changed = false;
+        for (int i = 0; i < selected.Count; i++)
+        {
+            PlayerMapRoomSnapshot room = selected[i];
+            if (room != null && !room.Disabled && room.Layer != target)
+            {
+                changed = true;
+                break;
+            }
+        }
+
+        QueueLayerChange(selected, target);
+        string layer = MapRoomLayer.Label(target);
+        EditorShortcutFeedback.PublishCustom(
+            changed ? "玩家地图图层切换到 " + layer : "没有房间需要切换图层",
+            changed ? "Player Map layer -> " + layer : "No rooms need a layer change",
+            keys,
+            changed,
+            changed ? EditorShortcutFeedbackVisual.Layer : EditorShortcutFeedbackVisual.Warning);
+    }
+
+    private static void QueueLayerChange(List<PlayerMapRoomSnapshot> selected, int targetLayer)
+    {
+        if (selected == null || selected.Count == 0) return;
+        targetLayer = Math.Max(0, Math.Min(PlayerMapCoordinateSystem.LayerCount - 1, targetLayer));
+
+        List<int> changed = new(selected.Count);
+        for (int i = 0; i < selected.Count; i++)
+        {
+            PlayerMapRoomSnapshot room = selected[i];
+            if (room != null && !room.Disabled && room.Layer != targetLayer)
+                changed.Add(room.RoomIndex);
+        }
+        if (changed.Count == 0) return;
+
+        PlayerMapGroupCommandQueue.Enqueue(new PlayerMapGroupLayerCommand(
+            changed.ToArray(),
+            targetLayer,
+            changed.Count == 1 ? "Change player-map room layer" : "Change player-map room layers"));
+    }
+
+}
+
+/// <summary>
+/// Batch placement controls for the current Player Map multi-selection. These controls are shown only
+/// for two or more rooms so the existing single-room inspector remains the focused editing surface.
+/// </summary>
+internal static class PlayerMapGroupPlacementControls
+{
+    private static bool enabled;
+
+    internal static void Enable(ManualLogSource logger)
+    {
+        if (enabled) return;
+        enabled = PlayerMapSelectionAccess.Available;
+        if (enabled)
+            logger?.LogInfo("Player Map grouped placement controls enabled through direct inspector calls; no self-detour attached.");
+        else
+            logger?.LogWarning("Player Map grouped placement controls disabled because selection adapter is unavailable.");
+    }
+
+    internal static void Disable() => enabled = false;
+
+    internal static void Draw(PlayerMapPresentationSnapshot snapshot)
+    {
+        if (!enabled || snapshot?.Available != true) return;
+
+        List<PlayerMapRoomSnapshot> selected = PlayerMapSelectionAccess.Collect(snapshot);
+        if (selected.Count < 2) return;
+
+        ImGui.Separator();
+        DevToolWidgets.SectionHeader(DevToolUiSettings.T("多选放置", "MULTI PLACEMENT"));
+        ImGui.TextDisabled(selected.Count + " rooms");
+
+        bool allDerived = true;
+        bool allAbsolute = true;
+        for (int i = 0; i < selected.Count; i++)
+        {
+            allDerived &= selected[i].Mode == PlayerMapPlacementMode.Derived;
+            allAbsolute &= selected[i].Mode == PlayerMapPlacementMode.Absolute;
+        }
+
+        if (DevToolWidgets.ActionButton(
+                "Derived",
+                "PlayerMapGroupDerived",
+                allDerived ? DevToolButtonTone.Primary : DevToolButtonTone.Subtle))
+            Queue(selected, PlayerMapGroupPlacementOperation.SetDerived, "Set player-map rooms to derived placement");
+
+        ImGui.SameLine();
+        if (DevToolWidgets.ActionButton(
+                "Absolute",
+                "PlayerMapGroupAbsolute",
+                allAbsolute ? DevToolButtonTone.Primary : DevToolButtonTone.Subtle))
+            Queue(selected, PlayerMapGroupPlacementOperation.SetAbsolute, "Set player-map rooms to absolute placement");
+
+        if (DevToolWidgets.ActionButton(
+                DevToolUiSettings.T("重置到 World Layout", "Reset to World Layout"),
+                "PlayerMapGroupResetOffset",
+                DevToolButtonTone.Subtle))
+            Queue(selected, PlayerMapGroupPlacementOperation.ResetOffset, "Reset player-map rooms to world layout");
+
+        ImGui.TextWrapped(DevToolUiSettings.T(
+            "切换 Derived/Absolute 会保持当前画面位置；重置到 World Layout 会将整组切回 Derived，并清零 Offset。",
+            "Derived/Absolute preserves current visual positions. Reset to World Layout switches the group to Derived and clears offsets."));
+    }
+
+    private static void Queue(
+        List<PlayerMapRoomSnapshot> selected,
+        PlayerMapGroupPlacementOperation operation,
+        string label)
+    {
+        if (selected == null || selected.Count == 0) return;
+        int[] rooms = new int[selected.Count];
+        for (int i = 0; i < selected.Count; i++) rooms[i] = selected[i].RoomIndex;
+        PlayerMapGroupCommandQueue.Enqueue(new PlayerMapGroupPlacementCommand(rooms, operation, label));
+    }
+
+}
+
+/// <summary>
+/// Exact multi-room alignment/distribution tools. Unlike drag/nudge commands these operations submit
+/// independent target positions through EnqueueExact, deliberately bypassing shared-delta snapping.
+/// All selected rooms must have a ready bake so edge/gap math uses their real Player Map rectangles.
+/// </summary>
+internal static class PlayerMapGroupLayoutControls
+{
+    private enum LayoutOperation
+    {
+        AlignLeft,
+        AlignCenterX,
+        AlignRight,
+        AlignBottom,
+        AlignCenterY,
+        AlignTop,
+        SpaceX,
+        SpaceY
+    }
+
+    private static bool enabled;
+
+    internal static void Enable(ManualLogSource logger)
+    {
+        if (enabled) return;
+        enabled = PlayerMapSelectionAccess.Available;
+        if (enabled)
+            logger?.LogInfo("Player Map grouped align/distribute controls enabled through direct inspector calls; no self-detour attached.");
+        else
+            logger?.LogWarning("Player Map grouped layout controls disabled because selection adapter is unavailable.");
+    }
+
+    internal static void Disable() => enabled = false;
+
+    internal static void Draw(PlayerMapPresentationSnapshot snapshot)
+    {
+        if (!enabled || snapshot?.Available != true) return;
+
+        List<PlayerMapRoomSnapshot> selected = PlayerMapSelectionAccess.Collect(snapshot);
+        if (selected.Count < 2) return;
+
+        ImGui.Separator();
+        DevToolWidgets.SectionHeader(DevToolUiSettings.T("多选布局", "MULTI LAYOUT"));
+
+        bool ready = true;
+        for (int i = 0; i < selected.Count; i++)
+        {
+            RoomMapBakeSnapshot bake = selected[i].Bake;
+            if (bake?.Status == RoomMapBakeStatus.Ready && bake.Width > 0 && bake.Height > 0) continue;
+            ready = false;
+            break;
+        }
+        if (!ready)
+        {
+            ImGui.TextWrapped(DevToolUiSettings.T(
+                "等待所选房间的 Map Bake 完成后才能进行精确对齐/分布。",
+                "Exact align/distribute is available after all selected room bakes are ready."));
+            return;
+        }
+
+        LayoutButton("Left", "PlayerMapAlignLeft", LayoutOperation.AlignLeft, selected);
+        ImGui.SameLine();
+        LayoutButton("Center X", "PlayerMapAlignCenterX", LayoutOperation.AlignCenterX, selected);
+        ImGui.SameLine();
+        LayoutButton("Right", "PlayerMapAlignRight", LayoutOperation.AlignRight, selected);
+
+        LayoutButton("Bottom", "PlayerMapAlignBottom", LayoutOperation.AlignBottom, selected);
+        ImGui.SameLine();
+        LayoutButton("Center Y", "PlayerMapAlignCenterY", LayoutOperation.AlignCenterY, selected);
+        ImGui.SameLine();
+        LayoutButton("Top", "PlayerMapAlignTop", LayoutOperation.AlignTop, selected);
+
+        if (selected.Count >= 3)
+        {
+            LayoutButton("Space X", "PlayerMapSpaceX", LayoutOperation.SpaceX, selected);
+            ImGui.SameLine();
+            LayoutButton("Space Y", "PlayerMapSpaceY", LayoutOperation.SpaceY, selected);
+        }
+    }
+
+    private static void LayoutButton(
+        string label,
+        string id,
+        LayoutOperation operation,
+        List<PlayerMapRoomSnapshot> selected)
+    {
+        if (DevToolWidgets.ActionButton(label, id, DevToolButtonTone.Subtle))
+            Apply(operation, selected);
+    }
+
+    private static void Apply(LayoutOperation operation, List<PlayerMapRoomSnapshot> selected)
+    {
+        if (selected == null || selected.Count < 2) return;
+
+        Dictionary<int, Vector2> targets = new(selected.Count);
+        for (int i = 0; i < selected.Count; i++)
+            targets[selected[i].RoomIndex] = selected[i].EffectivePosition;
+
+        float minLeft = float.MaxValue;
+        float maxRight = float.MinValue;
+        float minBottom = float.MaxValue;
+        float maxTop = float.MinValue;
+        for (int i = 0; i < selected.Count; i++)
+        {
+            PlayerMapRoomSnapshot room = selected[i];
+            float halfW = HalfWidth(room);
+            float halfH = HalfHeight(room);
+            minLeft = Math.Min(minLeft, room.EffectivePosition.x - halfW);
+            maxRight = Math.Max(maxRight, room.EffectivePosition.x + halfW);
+            minBottom = Math.Min(minBottom, room.EffectivePosition.y - halfH);
+            maxTop = Math.Max(maxTop, room.EffectivePosition.y + halfH);
+        }
+
+        switch (operation)
+        {
+            case LayoutOperation.AlignLeft:
+                for (int i = 0; i < selected.Count; i++)
+                    targets[selected[i].RoomIndex] = new Vector2(minLeft + HalfWidth(selected[i]), selected[i].EffectivePosition.y);
+                break;
+            case LayoutOperation.AlignCenterX:
+            {
+                float center = (minLeft + maxRight) * 0.5f;
+                for (int i = 0; i < selected.Count; i++)
+                    targets[selected[i].RoomIndex] = new Vector2(center, selected[i].EffectivePosition.y);
+                break;
+            }
+            case LayoutOperation.AlignRight:
+                for (int i = 0; i < selected.Count; i++)
+                    targets[selected[i].RoomIndex] = new Vector2(maxRight - HalfWidth(selected[i]), selected[i].EffectivePosition.y);
+                break;
+            case LayoutOperation.AlignBottom:
+                for (int i = 0; i < selected.Count; i++)
+                    targets[selected[i].RoomIndex] = new Vector2(selected[i].EffectivePosition.x, minBottom + HalfHeight(selected[i]));
+                break;
+            case LayoutOperation.AlignCenterY:
+            {
+                float center = (minBottom + maxTop) * 0.5f;
+                for (int i = 0; i < selected.Count; i++)
+                    targets[selected[i].RoomIndex] = new Vector2(selected[i].EffectivePosition.x, center);
+                break;
+            }
+            case LayoutOperation.AlignTop:
+                for (int i = 0; i < selected.Count; i++)
+                    targets[selected[i].RoomIndex] = new Vector2(selected[i].EffectivePosition.x, maxTop - HalfHeight(selected[i]));
+                break;
+            case LayoutOperation.SpaceX:
+                DistributeX(selected, targets);
+                break;
+            case LayoutOperation.SpaceY:
+                DistributeY(selected, targets);
+                break;
+        }
+
+        int[] ids = new int[selected.Count];
+        Vector2[] positions = new Vector2[selected.Count];
+        for (int i = 0; i < selected.Count; i++) ids[i] = selected[i].RoomIndex;
+        Array.Sort(ids);
+        for (int i = 0; i < ids.Length; i++) positions[i] = targets[ids[i]];
+
+        PlayerMapGroupCommandQueue.EnqueueExact(new PlayerMapGroupMoveCommand(
+            ids,
+            positions,
+            Label(operation)));
+    }
+
+    private static void DistributeX(
+        List<PlayerMapRoomSnapshot> selected,
+        Dictionary<int, Vector2> targets)
+    {
+        List<PlayerMapRoomSnapshot> ordered = new(selected);
+        ordered.Sort((a, b) =>
+        {
+            float leftA = a.EffectivePosition.x - HalfWidth(a);
+            float leftB = b.EffectivePosition.x - HalfWidth(b);
+            int compare = leftA.CompareTo(leftB);
+            return compare != 0 ? compare : a.RoomIndex.CompareTo(b.RoomIndex);
+        });
+
+        float left = ordered[0].EffectivePosition.x - HalfWidth(ordered[0]);
+        float right = ordered[ordered.Count - 1].EffectivePosition.x + HalfWidth(ordered[ordered.Count - 1]);
+        float totalWidth = 0f;
+        for (int i = 0; i < ordered.Count; i++) totalWidth += HalfWidth(ordered[i]) * 2f;
+        float gap = (right - left - totalWidth) / Math.Max(1, ordered.Count - 1);
+        float cursor = left;
+        for (int i = 0; i < ordered.Count; i++)
+        {
+            PlayerMapRoomSnapshot room = ordered[i];
+            float half = HalfWidth(room);
+            targets[room.RoomIndex] = new Vector2(cursor + half, room.EffectivePosition.y);
+            cursor += half * 2f + gap;
+        }
+    }
+
+    private static void DistributeY(
+        List<PlayerMapRoomSnapshot> selected,
+        Dictionary<int, Vector2> targets)
+    {
+        List<PlayerMapRoomSnapshot> ordered = new(selected);
+        ordered.Sort((a, b) =>
+        {
+            float bottomA = a.EffectivePosition.y - HalfHeight(a);
+            float bottomB = b.EffectivePosition.y - HalfHeight(b);
+            int compare = bottomA.CompareTo(bottomB);
+            return compare != 0 ? compare : a.RoomIndex.CompareTo(b.RoomIndex);
+        });
+
+        float bottom = ordered[0].EffectivePosition.y - HalfHeight(ordered[0]);
+        float top = ordered[ordered.Count - 1].EffectivePosition.y + HalfHeight(ordered[ordered.Count - 1]);
+        float totalHeight = 0f;
+        for (int i = 0; i < ordered.Count; i++) totalHeight += HalfHeight(ordered[i]) * 2f;
+        float gap = (top - bottom - totalHeight) / Math.Max(1, ordered.Count - 1);
+        float cursor = bottom;
+        for (int i = 0; i < ordered.Count; i++)
+        {
+            PlayerMapRoomSnapshot room = ordered[i];
+            float half = HalfHeight(room);
+            targets[room.RoomIndex] = new Vector2(room.EffectivePosition.x, cursor + half);
+            cursor += half * 2f + gap;
+        }
+    }
+
+    private static float HalfWidth(PlayerMapRoomSnapshot room) =>
+        room.Bake.Width * PlayerMapCoordinateSystem.CanonPixelsPerTile * 0.5f;
+
+    private static float HalfHeight(PlayerMapRoomSnapshot room) =>
+        room.Bake.Height * PlayerMapCoordinateSystem.CanonPixelsPerTile * 0.5f;
+
+    private static string Label(LayoutOperation operation) => operation switch
+    {
+        LayoutOperation.AlignLeft => "Align player-map rooms left",
+        LayoutOperation.AlignCenterX => "Align player-map rooms center X",
+        LayoutOperation.AlignRight => "Align player-map rooms right",
+        LayoutOperation.AlignBottom => "Align player-map rooms bottom",
+        LayoutOperation.AlignCenterY => "Align player-map rooms center Y",
+        LayoutOperation.AlignTop => "Align player-map rooms top",
+        LayoutOperation.SpaceX => "Distribute player-map rooms horizontally",
+        LayoutOperation.SpaceY => "Distribute player-map rooms vertically",
+        _ => "Layout player-map rooms"
+    };
+
+}

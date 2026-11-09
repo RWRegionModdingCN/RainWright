@@ -1,0 +1,202 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <!-- Full RainWright Mod by default. CI can select the portable core,
+         using separate output paths to protect the deployable game artifact. -->
+    <TargetFramework Condition="'$(RainwrightStandaloneSmokeTest)' == 'true'">net10.0</TargetFramework>
+    <TargetFramework Condition="'$(RainwrightStandaloneSmokeTest)' != 'true'">net48</TargetFramework>
+    <LangVersion>13</LangVersion>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <AssemblyName>RainWright</AssemblyName>
+    <RootNamespace>RainWright</RootNamespace>
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+    <!-- Separate the net10 test DLL from the actual net48 runtime artifact.
+         A smoke/test build must not overwrite the game-deployable binary. -->
+    <OutputPath Condition="'$(RainwrightStandaloneSmokeTest)' == 'true'">$(BaseOutputPath)$(Configuration)/net10-smoke/</OutputPath>
+    <!-- Build locally by default. Installation is explicit through scripts/Install.ps1. -->
+    <DeployToGame Condition="'$(DeployToGame)' == ''">false</DeployToGame>
+    <OutputPath Condition="'$(RainWrightPortableBuild)' == 'true'">$(BaseOutputPath)$(Configuration)/net48-core/</OutputPath>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+  </PropertyGroup>
+
+  <!-- Make the actual net48 DLL independently buildable on Windows and Linux
+       agents. Reference assemblies are compile-time only; they are not packed
+       into Rainwright.dll or copied beside the game. -->
+  <ItemGroup Condition="'$(RainwrightStandaloneSmokeTest)' != 'true'">
+    <PackageReference Include="Microsoft.NETFramework.ReferenceAssemblies.net48"
+                      Version="1.0.3" PrivateAssets="all" />
+    <!-- Sound group snapshots use init accessors under the net48 game target. -->
+    <PackageReference Include="PolySharp" Version="1.15.0" PrivateAssets="all" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Compile Include="Backend/Core/EditorBackupFiles.cs" />
+    <Compile Include="Backend/Settings/RainWrightPersonalSettings.cs" />
+    <Compile Include="Runtime/FrontendHookLedger.cs" />
+    <Compile Include="Runtime/EditorBackendServiceLedger.cs" />
+    <Compile Include="Runtime/PlayerMapServiceLifetimeLedger.cs" />
+    <!-- Shared editor UI mode, global shortcut animation bus and diagnostic
+         counters live in this DLL so multiple plugin frontends see one state. -->
+    <Compile Include="Backend/Core/EditorUiModeState.cs" />
+    <!-- Canonical editor identity and shortcut catalog used by all frontends. -->
+    <Compile Include="Backend/Core/EditorDocumentIdentity.cs" />
+    <Compile Include="Backend/Core/DevToolShortcutRegistry.cs" />
+    <Compile Include="Backend/Core/EditorShortcutFeedback.cs" />
+    <Compile Include="Backend/Core/EditorRevisionTracker.cs" />
+    <Compile Include="Backend/Core/EditorViewportPresentationHub.cs" />
+    <!-- Cross-plugin property serialization and the one native-command
+         inbox are Rainwright-owned; the Unity consumer remains an adapter. -->
+    <Compile Include="Backend/Objects/EditorPropertyModels.cs" />
+    <!-- Native/object and third-party compatibility DTOs belong to Rainwright. -->
+    <Compile Include="Backend/Objects/ObjectPresentationKind.cs" />
+    <Compile Include="Backend/Objects/EditorObjectGizmoSnapshots.cs" />
+    <Compile Include="Backend/Compatibility/LegacyControlSnapshot.cs" />
+    <Compile Include="Backend/Presentation/EditorPresentationSnapshots.cs" />
+    <Compile Include="Backend/Compatibility/UniversalDevUiPresentationSnapshot.cs" />
+    <Compile Include="Backend/Compatibility/UniversalDevUiCommandQueue.cs" />
+    <!-- Read-only immutable frontend view models; game adapters own capture
+         but do not emit a second class identity for third-party consumers. -->
+    <Compile Include="Backend/Presentation/EditorTriggerSnapshots.cs" />
+    <Compile Include="Backend/Presentation/EditorDialogSnapshots.cs" />
+    <Compile Include="Backend/Presentation/EditorRelationshipSnapshots.cs" />
+    <Compile Include="Backend/Presentation/EditorRoomSettingsSnapshots.cs" />
+    <Compile Include="Backend/Presentation/EditorSoundSnapshots.cs" />
+    <Compile Include="Backend/World/WorldConnectionDirection.cs" />
+    <Compile Include="Backend/Map/MapRoomLayer.cs" />
+    <Compile Include="Backend/Map/PlayerMapPlacementMode.cs" />
+    <Compile Include="Backend/Map/PlayerMapCoordinatePolicy.cs" />
+    <Compile Include="Backend/Map/PlayerMapRoomRecordPolicy.cs" />
+    <Compile Include="Backend/Map/PlayerMapConfigDocumentComposer.cs" />
+    <Compile Include="Backend/Map/LegacyMapLayoutMigration.cs" />
+    <Compile Include="Backend/Map/PlayerMapConfigFileTransaction.cs" />
+    <Compile Include="Backend/Map/PlayerMapStagedOutputValidator.cs" />
+    <Compile Include="Backend/Map/PlayerMapRenderFileTransaction.cs" />
+    <Compile Include="Backend/Map/PlayerMapRenderRevisionSnapshotGuard.cs" />
+    <Compile Include="Backend/Map/PlayerMapPreflightCore.cs" />
+    <Compile Include="Backend/Map/PlayerMapBakeReadiness.cs" />
+    <Compile Include="Backend/Map/PlayerMapAuthoringFingerprint.cs" />
+    <Compile Include="Backend/Map/PlayerMapRoomNamePolicy.cs" />
+    <Compile Include="Backend/Map/PlayerMapRoomVisibility.cs" />
+    <Compile Include="Backend/Presentation/EditorMapSnapshots.cs" />
+    <Compile Include="Backend/Presentation/PlayerMapRenderPresentation.cs" />
+    <Compile Include="Backend/Presentation/PlayerMapRenderProgress.cs" />
+    <Compile Include="Backend/Presentation/PlayerMapRenderReport.cs" />
+    <Compile Include="Backend/Presentation/RoomMapBakeSnapshots.cs" />
+    <Compile Include="Backend/Map/RoomMapGeometry.cs" />
+    <Compile Include="Backend/Commands/EditorUiCommandQueue.cs" />
+    <Compile Include="Backend/Commands/EditorUiCommandPolicy.cs" />
+    <Compile Include="Backend/Commands/EditorCommandInbox.cs" />
+    <Compile Include="Backend/Commands/RoomEditorCommandQueue.cs" />
+    <Compile Include="Backend/Commands/MapEditorCommandQueue.cs" />
+    <Compile Include="Backend/Commands/PlayerMapCommandTransport.cs" />
+    <Compile Include="Backend/Commands/PlayerMapGroupCommandTransport.cs" />
+    <Compile Include="Backend/Commands/PlayerMapGroupCommandTypes.cs" />
+    <Compile Include="Backend/Commands/PlayerMapMigrationCommandTransport.cs" />
+    <Compile Include="Backend/Commands/NativeObjectGizmoEditCommandQueue.cs" />
+    <Compile Include="Backend/Commands/NativeGizmoCommandQueue.cs" />
+    <Compile Include="Backend/Commands/RelationshipEditorCommandQueue.cs" />
+    <Compile Include="Backend/Commands/DialogEditorCommandQueue.cs" />
+    <Compile Include="Backend/Commands/TriggerEditorCommandQueue.cs" />
+    <Compile Include="Backend/Commands/SoundEditorCommandQueue.cs" />
+    <Compile Include="Backend/Core/DevToolPerformanceMonitor.cs" />
+    <Compile Include="Backend/AutoSave/EditorRecoveryFileTransaction.cs" />
+    <Compile Include="Backend/AutoSave/EditorAutoSaveSchedule.cs" />
+    <Compile Include="Backend/History/EditorHistoryJournal.cs" />
+    <Compile Include="Backend/History/EditorContinuousEditRegistry.cs" />
+    <Compile Include="Backend/History/EditorCompositeHistoryExecutor.cs" />
+    <Compile Include="Runtime/FrontendPluginOwnerGate.cs" />
+    <Compile Include="Runtime/FrontendRetainedSessionGate.cs" />
+    <Compile Include="Runtime/FrontendSessionVisibilityPolicy.cs" />
+    <Compile Include="Runtime/FrontendPageRegistryCore.cs" />
+    <Compile Include="Runtime/FrontendOwnedAtlasCleanup.cs" />
+    <Compile Include="Runtime/DevToolPageStatusState.cs" />
+    <Compile Include="Runtime/DevToolWorkspaceLayout.cs" />
+    <Compile Include="Runtime/CreatureCatalogRuntimeLease.cs" />
+    <Compile Include="Runtime/OptionalFrontendDebugSection.cs" />
+    <Compile Include="Runtime/RetainedCleanupBatch.cs" />
+    <!-- Pure World Map retention/scheduling state. Its behavior is already
+         covered by production-linked routing and hidden/OH cadence tests. -->
+    <Compile Include="Runtime/WorldMap/WorldMapBackgroundSchedulingPolicy.cs" />
+    <Compile Include="Runtime/WorldMap/WorldMapDirtySet.cs" />
+    <Compile Include="Runtime/WorldMap/WorldMapViewTransform.cs" />
+    <Compile Include="Runtime/WorldMap/MapDepthProjection.cs" />
+    <Compile Include="Runtime/WorldMap/WorldMapViewTransformMailbox.cs" />
+    <Compile Include="Runtime/WorldMap/WorldMapRouteSpatialCore.cs" />
+    <Compile Include="Runtime/WorldMap/WorldMapDashSegmentEnumerator.cs" />
+    <Compile Include="Runtime/WorldMap/WorldMapRoomSpatialCore.cs" />
+    <Compile Include="Runtime/WorldMap/WorldMapRouteCrossingCore.cs" />
+    <Compile Include="Runtime/Objects/ObjectSceneVisibilityCore.cs" />
+    <Compile Include="Runtime/Objects/ObjectSceneProjectionCore.cs" />
+    <Compile Include="Runtime/Objects/ObjectSceneListPlanner.cs" />
+    <Compile Include="Runtime/Sound/SoundSceneSelectionCore.cs" />
+    <Compile Include="Runtime/Sound/SoundGroupWorkspaceCore.cs" />
+    <!-- Immutable route solving and direction marker geometry are shared
+         Rainwright frontend math, independent of Unity/gameplay assemblies. -->
+    <Compile Include="Runtime/WorldMap/WorldMapOrthogonalRouter.cs" />
+    <Compile Include="Runtime/WorldMap/WorldMapVisibilityRouter.cs" />
+    <Compile Include="Runtime/WorldMap/WorldMapDirectionMarkerGeometry.cs" />
+    <Compile Include="Runtime/WorldMap/WorldMapJunctionWeavePlanner.cs" />
+    <!-- Portable authoring policy and owned XML storage have no dependency on
+         DryCycle gameplay, BepInEx or Unity. These are the first backend
+         services now hosted inside Rainwright.dll, not DryCycle.dll. -->
+    <Compile Include="Backend/AutoSave/RainwrightAutoSaveSettingsStore.cs" />
+    <Compile Include="Backend/Input/RainwrightShortcutInputSettingsStore.cs" />
+    <!-- Shared authoring backend and legacy read-only import rules are owned
+         by Rainwright, not recompiled into the game plugin. -->
+    <Compile Include="Backend/Authoring/EditorAuthoringParticipants.cs" />
+    <Compile Include="Backend/Authoring/EditorRegionVariantContributors.cs" />
+    <Compile Include="Backend/Sound/SoundGroupConfigPaths.cs" />
+    <Compile Include="Backend/Relationships/RelationshipExportPaths.cs" />
+    <!-- Cartography author document/codec, serialization and migration are
+         portable Rainwright backend; detached game room sources stay in DryCycle. -->
+    <Compile Include="Backend/Cartography/CartographyDocumentModel.cs" />
+    <Compile Include="Backend/Cartography/CartographyAppearance.cs" />
+    <Compile Include="Backend/Cartography/CartographyStorage.cs" />
+    <Compile Include="Backend/Cartography/CartographyProjectPaths.cs" />
+    <Compile Include="Backend/Cartography/CartographyJson.cs" />
+    <Compile Include="Backend/Cartography/CartographyEditingCore.cs" />
+    <Compile Include="Backend/Cartography/CartographyRouteGeometry.cs" />
+    <Compile Include="Backend/Cartography/CartographyRegionFiles.cs" />
+    <Compile Include="Backend/Cartography/CartographySourceFingerprintCache.cs" />
+    <Compile Include="Backend/Cartography/CartographyPngStreamEncoder.cs" />
+    <Compile Include="Backend/Palette/*.cs" />
+    <Compile Include="Backend/Cartography/CartographyRenderLayerPlanner.cs" />
+    <Compile Include="Backend/Cartography/CartographySceneRetentionCache.cs" />
+    <!-- World authoring text and public sound-group snapshots do not depend on
+         the game runtime, Unity or BepInEx. Keep one assembly owner for their types. -->
+    <Compile Include="Backend/World/WorldDocument.cs" />
+    <Compile Include="Backend/World/WorldConnectionToken.cs" />
+    <Compile Include="Backend/World/WorldFileVariants.cs" />
+    <Compile Include="Backend/World/WorldVariantFileTransaction.cs" />
+    <Compile Include="Backend/World/ModificationFileComposer.cs" />
+    <Compile Include="Backend/Background/BackgroundDocument.cs" />
+    <Compile Include="Backend/Sound/SoundGroupModels.cs" />
+    <!-- The sprite sheets and their lookup contract belong to the publishable
+         editor DLL, not the DryCycle gameplay assembly. -->
+    <Compile Include="Backend/Cartography/CartographyResourceLocator.cs" />
+    <EmbeddedResource Include="Backend/Cartography/Assets/*.png"
+                      LogicalName="Rainwright.Cartography.%(Filename)%(Extension)" />
+    <!-- Preserve existing namespace/member contracts during physical assembly
+         extraction. Only the core Rainwright runtime and its consumers may
+         access transitional internal types. -->
+    <!-- View transforms use System.Numerics.Vector2 under Rain World's net48 runtime. -->
+    <Reference Include="System.Numerics" Condition="'$(RainwrightStandaloneSmokeTest)' != 'true'" />
+    <Reference Include="System.Xml.Linq" Condition="'$(RainwrightStandaloneSmokeTest)' != 'true'" />
+    <Reference Include="System.Runtime.Serialization" Condition="'$(RainwrightStandaloneSmokeTest)' != 'true'" />
+    <InternalsVisibleTo Include="DryCycle" />
+    <InternalsVisibleTo Include="DryCycle.DevTool.RWImGui" />
+    <InternalsVisibleTo Include="DryCycle.WorldData.RWImGui" />
+    <!-- Test cross-assembly world.txt behavior through the actual Rainwright.dll. -->
+    <InternalsVisibleTo Include="RainwrightAssembly.Tests" />
+    <InternalsVisibleTo Include="CartographyAdapter.Tests" />
+    <InternalsVisibleTo Include="WorldMapSpatialAdapter.Tests" />
+    <InternalsVisibleTo Include="ObjectSceneAdapter.Tests" />
+    <InternalsVisibleTo Include="SoundSelectionAdapter.Tests" />
+    <InternalsVisibleTo Include="FrontendOwnerGate.Tests" />
+    <InternalsVisibleTo Include="FrontendRetainedLifecycle.Tests" />
+    <InternalsVisibleTo Include="FrontendSessionVisibility.Tests" />
+    <InternalsVisibleTo Include="FrontendPageRegistry.Tests" />
+  </ItemGroup>
+  <Import Project="Rainwright.Runtime.props" Condition="'$(RainwrightStandaloneSmokeTest)' != 'true' and '$(RainWrightPortableBuild)' != 'true'" />
+</Project>

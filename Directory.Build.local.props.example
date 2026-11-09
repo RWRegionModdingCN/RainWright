@@ -1,0 +1,7 @@
+<Project>
+  <PropertyGroup>
+    <RainWorldDir>D:/Steam/steamapps/common/Rain World</RainWorldDir>
+    <!-- Set this only if automatic RWImGUI discovery cannot find your installation. -->
+    <!-- <RWImGuiPluginDir>D:/Steam/steamapps/workshop/content/312520/3417372413/plugins</RWImGuiPluginDir> -->
+  </PropertyGroup>
+</Project>

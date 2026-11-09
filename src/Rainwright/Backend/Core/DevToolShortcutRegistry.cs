@@ -1,0 +1,203 @@
+using System;
+using System.Collections.Generic;
+using System.Linq;
+
+namespace DryCycle.DevUI.DevTool.Core;
+
+/// <summary>
+/// Presentation-agnostic shortcut metadata shared by DevTool frontends.
+/// The registry owns labels and scope; input handling remains in EditorInputRouter and the individual
+/// editor tools. Every discrete keyboard handler must publish through EditorShortcutFeedback so the
+/// top-center animation is consistent across global and view-specific shortcuts. Mods may register
+/// additional rows without referencing RWImGui.
+/// </summary>
+public sealed class DevToolShortcutDescriptor
+{
+    public DevToolShortcutDescriptor(
+        string id,
+        string input,
+        string chineseDescription,
+        string englishDescription,
+        int order = 0)
+    {
+        Id = string.IsNullOrWhiteSpace(id) ? throw new ArgumentException("Shortcut id is required.", nameof(id)) : id.Trim();
+        Input = input?.Trim() ?? string.Empty;
+        ChineseDescription = chineseDescription?.Trim() ?? string.Empty;
+        EnglishDescription = englishDescription?.Trim() ?? string.Empty;
+        Order = order;
+    }
+
+    public string Id { get; }
+    public string Input { get; }
+    public string ChineseDescription { get; }
+    public string EnglishDescription { get; }
+    public int Order { get; }
+}
+
+/// <summary>
+/// One central shortcut catalog for the rebuilt DevTool.
+/// Duplicate ids replace the previous row inside the same scope, which lets compatibility layers
+/// refine wording without creating duplicate UI entries. Getters return snapshots safe to enumerate
+/// from the RWImGui render thread.
+/// </summary>
+public static class DevToolShortcutRegistry
+{
+    private sealed class Registration
+    {
+        internal DevToolShortcutDescriptor Descriptor;
+        internal long Sequence;
+    }
+
+    private static readonly object Gate = new();
+    private static readonly Dictionary<string, Registration> Common = new(StringComparer.OrdinalIgnoreCase);
+    private static readonly Dictionary<EditorToolMode, Dictionary<string, Registration>> Modes = new();
+    private static long sequence;
+    private static long revision;
+
+    static DevToolShortcutRegistry()
+    {
+        RegisterBuiltIns();
+    }
+
+    /// <summary>
+    /// Monotonic content revision. Frontends can keep their sorted snapshot instead of allocating
+    /// and sorting the registry every render frame, then refresh only when registrations change.
+    /// </summary>
+    public static long Revision
+    {
+        get
+        {
+            lock (Gate) return revision;
+        }
+    }
+
+    public static void RegisterCommon(DevToolShortcutDescriptor descriptor) =>
+        Register(Common, descriptor);
+
+    public static void RegisterMode(EditorToolMode mode, DevToolShortcutDescriptor descriptor)
+    {
+        if (descriptor == null) throw new ArgumentNullException(nameof(descriptor));
+        lock (Gate)
+        {
+            if (!Modes.TryGetValue(mode, out Dictionary<string, Registration> bucket))
+            {
+                bucket = new Dictionary<string, Registration>(StringComparer.OrdinalIgnoreCase);
+                Modes[mode] = bucket;
+            }
+            RegisterLocked(bucket, descriptor);
+        }
+    }
+
+    public static bool UnregisterCommon(string id)
+    {
+        if (string.IsNullOrWhiteSpace(id)) return false;
+        lock (Gate)
+        {
+            bool removed = Common.Remove(id.Trim());
+            if (removed) revision++;
+            return removed;
+        }
+    }
+
+    public static bool UnregisterMode(EditorToolMode mode, string id)
+    {
+        if (string.IsNullOrWhiteSpace(id)) return false;
+        lock (Gate)
+        {
+            bool removed = Modes.TryGetValue(mode, out Dictionary<string, Registration> bucket) && bucket.Remove(id.Trim());
+            if (removed) revision++;
+            return removed;
+        }
+    }
+
+    public static DevToolShortcutDescriptor[] GetCommon()
+    {
+        lock (Gate) return Snapshot(Common);
+    }
+
+    public static DevToolShortcutDescriptor[] GetMode(EditorToolMode mode)
+    {
+        lock (Gate)
+            return Modes.TryGetValue(mode, out Dictionary<string, Registration> bucket)
+                ? Snapshot(bucket)
+                : Array.Empty<DevToolShortcutDescriptor>();
+    }
+
+    private static void Register(Dictionary<string, Registration> bucket, DevToolShortcutDescriptor descriptor)
+    {
+        if (descriptor == null) throw new ArgumentNullException(nameof(descriptor));
+        lock (Gate) RegisterLocked(bucket, descriptor);
+    }
+
+    private static void RegisterLocked(Dictionary<string, Registration> bucket, DevToolShortcutDescriptor descriptor)
+    {
+        if (bucket.TryGetValue(descriptor.Id, out Registration current))
+        {
+            current.Descriptor = descriptor;
+            revision++;
+            return;
+        }
+
+        bucket[descriptor.Id] = new Registration
+        {
+            Descriptor = descriptor,
+            Sequence = sequence++
+        };
+        revision++;
+    }
+
+    private static DevToolShortcutDescriptor[] Snapshot(Dictionary<string, Registration> bucket) =>
+        bucket.Values
+            .OrderBy(value => value.Descriptor.Order)
+            .ThenBy(value => value.Sequence)
+            .Select(value => value.Descriptor)
+            .ToArray();
+
+    private static void RegisterBuiltIns()
+    {
+        RegisterCommon(new DevToolShortcutDescriptor("save", "Ctrl+S", "保存当前编辑内容", "Save current edits", 10));
+        RegisterCommon(new DevToolShortcutDescriptor("undo", "Ctrl+Z", "撤销上一步", "Undo last action", 20));
+        RegisterCommon(new DevToolShortcutDescriptor("redo-shift", "Ctrl+Shift+Z", "重做", "Redo", 30));
+        RegisterCommon(new DevToolShortcutDescriptor("redo-y", "Ctrl+Y", "重做（备用快捷键）", "Redo (alternate)", 31));
+        RegisterCommon(new DevToolShortcutDescriptor("delete", "X", "删除当前视图所选内容", "Delete the current view selection", 35));
+        RegisterCommon(new DevToolShortcutDescriptor("focus", "Tab", "进入 / 退出专注模式", "Enter / exit Focus mode", 40));
+        RegisterCommon(new DevToolShortcutDescriptor("browser", "Ctrl+B", "显示 / 隐藏浏览器", "Show / hide Browser", 50));
+        RegisterCommon(new DevToolShortcutDescriptor("inspector", "Ctrl+I", "显示 / 隐藏检查器", "Show / hide Inspector", 60));
+        RegisterCommon(new DevToolShortcutDescriptor("presentation", "Ctrl+Shift+U", "切换新 UI / 原版 DevUI", "Toggle New UI / Vanilla DevUI", 70));
+        RegisterCommon(new DevToolShortcutDescriptor("top-status", "", "显示 / 隐藏顶部状态栏", "Show / hide top status bar", 75));
+        RegisterCommon(new DevToolShortcutDescriptor("escape", "Esc", "取消当前放置；否则隐藏 DevTool UI", "Cancel placement; otherwise hide DevTool UI", 80));
+        RegisterCommon(new DevToolShortcutDescriptor("window-marquee", "Shift+LMB Drag", "多选编辑器窗口", "Multi-select editor windows", 100));
+        RegisterCommon(new DevToolShortcutDescriptor("window-group", "Ctrl+G", "将当前选中的窗口编组", "Group selected windows", 110));
+        RegisterCommon(new DevToolShortcutDescriptor("window-group-move", "Drag Title", "整组移动已编组窗口", "Move the whole window group", 120));
+
+        RegisterMode(EditorToolMode.Objects,
+            new DevToolShortcutDescriptor("objects-duplicate", "Ctrl+D", "复制当前选中物件", "Duplicate selected objects", 10));
+        RegisterMode(EditorToolMode.Objects,
+            new DevToolShortcutDescriptor("objects-toggle-selection", "Ctrl+LMB", "切换场景列表中的单个物件选择", "Toggle one object in the Scene selection", 30));
+        RegisterMode(EditorToolMode.Objects,
+            new DevToolShortcutDescriptor("objects-range-selection", "Shift+LMB", "从上次锚点范围选择场景物件", "Range-select Scene objects from the last anchor", 40));
+        RegisterMode(EditorToolMode.Objects,
+            new DevToolShortcutDescriptor("objects-place", "LMB", "放置当前选择的物件", "Place the selected object", 50));
+        RegisterMode(EditorToolMode.Objects,
+            new DevToolShortcutDescriptor("objects-place-repeat", "Shift+LMB", "连续放置当前物件", "Place repeatedly", 60));
+        RegisterMode(EditorToolMode.Objects,
+            new DevToolShortcutDescriptor("objects-place-cancel", "RMB / Esc", "取消物件放置", "Cancel object placement", 70));
+
+        RegisterMode(EditorToolMode.Sound,
+            new DevToolShortcutDescriptor("sound-select-all", "Ctrl+A", "全选当前声音列表", "Select all sounds in the current list", 10));
+        RegisterMode(EditorToolMode.Sound,
+            new DevToolShortcutDescriptor("sound-handle", "LMB Drag", "拖动世界中的声音控制点；控制点优先于覆盖在其上的窗口", "Drag sound world handles; handles take priority over overlapping windows", 20));
+
+        RegisterMode(EditorToolMode.Triggers,
+            new DevToolShortcutDescriptor("trigger-spot-handle", "LMB Drag", "拖动 Spot 中心点或半径控制点；半径控制点可 360° 旋转", "Drag the Spot center or radius handle; the radius handle rotates through 360°", 20));
+
+        RegisterMode(EditorToolMode.Map,
+            new DevToolShortcutDescriptor("player-map-layer", "1 / 2 / 3", "在 Player Map 将所选房间切换到对应图层", "Move selected Player Map rooms to the chosen layer", 20));
+        RegisterMode(EditorToolMode.Map,
+            new DevToolShortcutDescriptor("player-map-nudge", "Arrow Keys", "在 Player Map 微调所选房间", "Nudge selected Player Map rooms", 30));
+        RegisterMode(EditorToolMode.Map,
+            new DevToolShortcutDescriptor("player-map-nudge-fast", "Shift+Arrow", "在 Player Map 快速微调所选房间", "Nudge selected Player Map rooms by a larger step", 31));
+        RegisterMode(EditorToolMode.Map,
+            new DevToolShortcutDescriptor("cartography-select-all", "Ctrl+A", "在 Cartography 全选可编辑元素", "Select all editable Cartography items", 40));
+    }
+}

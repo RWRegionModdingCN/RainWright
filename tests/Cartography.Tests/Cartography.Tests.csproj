@@ -1,0 +1,43 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net48</TargetFramework>
+    <LangVersion>13</LangVersion>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+  </PropertyGroup>
+  <ItemGroup>
+    <EmbeddedResource Include="../../src/Rainwright/Backend/Cartography/Assets/*.png" LogicalName="DryCycle.Cartography.%(Filename)%(Extension)" />
+    <Reference Include="System.Drawing" />
+    <Reference Include="System.IO.Compression" />
+    <Reference Include="System.Xml.Linq" />
+    <Reference Include="System.Runtime.Serialization" />
+    <Compile Include="../../src/Rainwright/Backend/Map/RoomMapGeometry.cs" Link="Production/RoomMapGeometry.cs" />
+    <Compile Include="../../src/Rainwright/Backend/Presentation/RoomMapBakeSnapshots.cs" Link="Production/RoomMapBakeSnapshots.cs" />
+    <Compile Include="../../src/Rainwright/Backend/World/WorldDocument.cs" Link="Production/WorldDocument.cs" />
+    <Compile Include="../../src/Rainwright/Backend/World/WorldConnectionToken.cs" Link="Production/WorldConnectionToken.cs" />
+    <Compile Include="../../src/Rainwright/Backend/Cartography/CartographyRegionFiles.cs"
+             Link="Production/CartographyRegionFiles.cs" />
+    <Compile Include="../../src/Rainwright/Backend/Cartography/CartographySourceFingerprintCache.cs"
+             Link="Production/CartographySourceFingerprintCache.cs" />
+    <Compile Include="../../src/Rainwright/Backend/Cartography/CartographyPngStreamEncoder.cs"
+             Link="Production/CartographyPngStreamEncoder.cs" />
+    <Compile Include="../../src/Rainwright/Backend/Cartography/CartographyRenderLayerPlanner.cs"
+             Link="Production/CartographyRenderLayerPlanner.cs" />
+    <Compile Include="../../src/Rainwright/Backend/Cartography/CartographySceneRetentionCache.cs"
+             Link="Production/CartographySceneRetentionCache.cs" />
+    <!-- The author edit engine now physically lives under Rainwright. -->
+    <Compile Include="../../src/Rainwright/Backend/Cartography/CartographyEditingCore.cs"
+             Link="Production/CartographyEditingCore.cs" />
+    <PackageReference Include="PolySharp" Version="1.15.0" PrivateAssets="all" />
+    <Compile Include="../../src/Rainwright/Backend/Cartography/CartographyDocumentModel.cs" Link="Production/CartographyDocumentModel.cs" />
+    <Compile Include="../../src/Rainwright/Backend/Cartography/CartographyAppearance.cs" Link="Production/CartographyAppearance.cs" />
+    <Compile Include="../../src/Rainwright/Backend/Cartography/CartographyStorage.cs" Link="Production/CartographyStorage.cs" />
+    <Compile Include="../../src/Rainwright/Backend/Cartography/CartographyProjectPaths.cs" Link="Production/CartographyProjectPaths.cs" />
+    <Compile Include="../../src/Rainwright/Backend/Cartography/CartographyJson.cs" Link="Production/CartographyJson.cs" />
+    <Compile Include="../../src/Rainwright/Backend/Cartography/CartographyResourceLocator.cs" Link="Production/CartographyResourceLocator.cs" />
+    <Compile Include="../../src/Rainwright/Game/DevTool/Map/Cartography/*.cs" Exclude="../../src/Rainwright/Game/DevTool/Map/Cartography/CartographyGameAssets.cs" Link="Production/%(Filename)%(Extension)" />
+    <Compile Include="../../src/Rainwright/Game/DevTool/History/EditorHistoryService.cs" Link="Production/EditorHistoryService.cs" />
+  </ItemGroup>
+  <ItemGroup><Compile Include="../../src/Rainwright/Backend/Core/EditorBackupFiles.cs" Link="Production/EditorBackupFiles.cs" /></ItemGroup>
+</Project>

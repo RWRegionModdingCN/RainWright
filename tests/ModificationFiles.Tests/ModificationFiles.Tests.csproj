@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType><TargetFramework>net10.0</TargetFramework><LangVersion>13</LangVersion>
+    <DefineConstants>$(DefineConstants);RAINWRIGHT_RUNTIME</DefineConstants><ImplicitUsings>disable</ImplicitUsings><Nullable>disable</Nullable>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="../../src/Rainwright/Game/DevTool/Core/EditorSlowOperation.cs" Link="Production/EditorSlowOperation.cs" />
+    <Compile Include="../../src/Rainwright/Backend/World/ModificationFileComposer.cs" Link="Production/ModificationFileComposer.cs" />
+    <Compile Include="../../src/Rainwright/Backend/World/WorldDocument.cs" Link="Production/WorldDocument.cs" />
+    <Compile Include="../../src/Rainwright/Backend/World/WorldConnectionToken.cs" Link="Production/WorldConnectionToken.cs" />
+    <Compile Include="../../src/Rainwright/Game/DevTool/World/WorldModificationWorkspace.cs" Link="Production/WorldModificationWorkspace.cs" />
+    <Compile Include="../../src/Rainwright/Game/DevTool/World/WorldAuthoringPathResolver.cs" Link="Production/WorldAuthoringPathResolver.cs" />
+    <Compile Include="../../src/Shared/AuthoringSourcePaths.cs" Link="Production/AuthoringSourcePaths.cs" />
+  </ItemGroup>
+  <ItemGroup><Compile Include="../../src/Rainwright/Backend/Core/EditorBackupFiles.cs" Link="Production/EditorBackupFiles.cs" /></ItemGroup>
+</Project>

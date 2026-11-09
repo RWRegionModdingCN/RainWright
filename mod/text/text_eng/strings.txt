@@ -1,0 +1,15 @@
+0
+rainwright-name|RainWright
+rainwright-description|RainWright is an independent UI tool for Rain World region creators, designed to provide a more modern, intuitive and efficient development experience.<LINE><LINE>RainWright redesigns the page layout and interactions of the vanilla Dev Tools and integrates the features of World Editor and Cornifer into one visual workspace.<LINE><LINE>Built around familiar workflows and developer needs, RainWright adds two-way room connections, hot reloading for connection changes and creature spawns, custom sound grouping and management, more human-friendly shortcuts, and automatic save recovery to simplify content creation and debugging.
+rainwright-about-tab|About
+rainwright-about-subtitle|Rain World Dev Tools Rework
+rainwright-about-overview|Toolkit
+rainwright-about-workspace|Unified workspace
+rainwright-about-tools|Creation and debugging
+rainwright-about-cover|Cover artwork
+rainwright-tab-ui|UI
+rainwright-tab-edit|Edit
+rainwright-tab-keys|Keys
+rainwright-tab-save|Save
+rainwright-tab-presets|Presets
+rainwright-tab-style|Style

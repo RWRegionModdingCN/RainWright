@@ -1,0 +1,908 @@
+using System;
+using System.Collections.Generic;
+using DryCycle.DevUI.DevTool.Objects;
+using DryCycle.DevUI.DevTool.Triggers;
+using ImGuiNET;
+using Num = System.Numerics;
+
+namespace DryCycle.DevUI.DevTool.RWImGui;
+
+internal static partial class TriggerEditorView
+{
+    private readonly struct EditBindingKey : IEquatable<EditBindingKey>
+    {
+        internal EditBindingKey(int index, string key, string label, bool eventField, bool chinese)
+        {
+            Index = index;
+            Key = key ?? string.Empty;
+            Label = label ?? string.Empty;
+            EventField = eventField;
+            Chinese = chinese;
+        }
+
+        private int Index { get; }
+        private string Key { get; }
+        private string Label { get; }
+        private bool EventField { get; }
+        private bool Chinese { get; }
+
+        public bool Equals(EditBindingKey other) =>
+            Index == other.Index && EventField == other.EventField && Chinese == other.Chinese &&
+            string.Equals(Key, other.Key, StringComparison.Ordinal) &&
+            string.Equals(Label, other.Label, StringComparison.Ordinal);
+
+        public override bool Equals(object obj) => obj is EditBindingKey other && Equals(other);
+
+        public override int GetHashCode()
+        {
+            unchecked
+            {
+                int hash = Index;
+                hash = hash * 397 ^ (EventField ? 1 : 0);
+                hash = hash * 397 ^ (Chinese ? 1 : 0);
+                hash = hash * 397 ^ StringComparer.Ordinal.GetHashCode(Key);
+                hash = hash * 397 ^ StringComparer.Ordinal.GetHashCode(Label);
+                return hash;
+            }
+        }
+    }
+
+    private sealed class EditBinding
+    {
+        internal string StateKey;
+        internal string WidgetLabel;
+        internal string OptionalLabel;
+    }
+
+    private static readonly Dictionary<string, Num.Vector2> VectorEdits = new(StringComparer.Ordinal);
+    private static readonly Dictionary<string, string> StringEdits = new(StringComparer.Ordinal);
+    private static readonly Dictionary<EditBindingKey, EditBinding> EditBindings = new();
+    private static readonly EditorTriggeredEventSnapshot EmptyEvent = new();
+    private static readonly string[] KarmaLabelsEnglish = { "None", "2", "3", "4", "5" };
+    private static readonly string[] KarmaLabelsChinese = { "无", "2", "3", "4", "5" };
+
+    private static bool sceneTab;
+    private static string search = string.Empty;
+    private static string observedSearch;
+    private static string normalizedSearch = string.Empty;
+
+    private static string[] projectedTriggerTypes;
+    private static string[] projectedTriggerTypeLabels = Array.Empty<string>();
+    private static string[] projectedTriggerMatchTypes;
+    private static string projectedTriggerMatchSearch = string.Empty;
+    private static readonly List<int> ProjectedTriggerMatches = new();
+    private static EditorTriggerSnapshot[] projectedSceneTriggers;
+    private static string[] projectedSceneLabels = Array.Empty<string>();
+    private static string[] projectedEventTypes;
+    private static string[] projectedEventTypeLabels = Array.Empty<string>();
+    private static string[] projectedSongs;
+    private static string projectedSongKey = string.Empty;
+    private static string[] projectedSongLabels = Array.Empty<string>();
+    private static string[] projectedSlugcats;
+    private static string[] projectedSlugcatLabels = Array.Empty<string>();
+    private static int projectedEntranceCount = -1;
+    private static bool projectedEntranceChinese;
+    private static string[] projectedEntranceLabels = Array.Empty<string>();
+
+    internal static void ResetRetainedState()
+    {
+        VectorEdits.Clear();
+        StringEdits.Clear();
+        EditBindings.Clear();
+
+        sceneTab = false;
+        search = string.Empty;
+        observedSearch = null;
+        normalizedSearch = string.Empty;
+
+        projectedTriggerTypes = null;
+        projectedTriggerTypeLabels = Array.Empty<string>();
+        projectedTriggerMatchTypes = null;
+        projectedTriggerMatchSearch = string.Empty;
+        ProjectedTriggerMatches.Clear();
+        projectedSceneTriggers = null;
+        projectedSceneLabels = Array.Empty<string>();
+        projectedEventTypes = null;
+        projectedEventTypeLabels = Array.Empty<string>();
+        projectedSongs = null;
+        projectedSongKey = string.Empty;
+        projectedSongLabels = Array.Empty<string>();
+        projectedSlugcats = null;
+        projectedSlugcatLabels = Array.Empty<string>();
+        projectedEntranceCount = -1;
+        projectedEntranceChinese = false;
+        projectedEntranceLabels = Array.Empty<string>();
+
+        ResetWorkspaceRetainedState();
+    }
+
+    internal static void DrawBrowser(EditorTriggerPresentationSnapshot snapshot)
+    {
+        if (!snapshot.Available)
+        {
+            DevToolWidgets.MutedText(DevToolUiSettings.T("触发器编辑器不可用。", "Trigger editor unavailable."), true);
+            return;
+        }
+
+        bool sceneInBrowser = !DevToolUiSettings.SceneInCenter;
+        if (!sceneInBrowser) sceneTab = false;
+
+        string libraryLabel = sceneTab ? DevToolUiSettings.T("资源库", "Library") : DevToolUiSettings.T("资源库*", "Library*");
+        string sceneLabel = sceneTab ? DevToolUiSettings.T("场景*", "Scene*") : DevToolUiSettings.T("场景", "Scene");
+        if (DevToolWidgets.ActionButton(libraryLabel, "TriggerLibraryTab", sceneTab ? DevToolButtonTone.Subtle : DevToolButtonTone.Primary))
+            sceneTab = false;
+        if (sceneInBrowser)
+        {
+            DevToolWidgets.SameLineIfFits(DevToolWidgets.ButtonWidth(sceneLabel));
+            if (DevToolWidgets.ActionButton(sceneLabel, "TriggerSceneTab", sceneTab ? DevToolButtonTone.Primary : DevToolButtonTone.Subtle))
+                sceneTab = true;
+        }
+        ImGui.Separator();
+
+        if (sceneTab && sceneInBrowser) DrawSceneWorkspace(snapshot);
+        else DrawLibrary(snapshot);
+    }
+
+    internal static void DrawInspector(EditorTriggerPresentationSnapshot snapshot)
+    {
+        if (!snapshot.Available)
+        {
+            DevToolWidgets.MutedText(DevToolUiSettings.T("触发器编辑器不可用。", "Trigger editor unavailable."), true);
+            return;
+        }
+
+        EditorTriggerSnapshot selected = FindSelected(snapshot);
+        if (selected == null)
+        {
+            DevToolWidgets.PaneTitle(
+                DevToolUiSettings.T("触发器", "Trigger"));
+            ImGui.TextWrapped(DevToolUiSettings.T("从场景列表或世界 Gizmo 中选择一个触发器。", "Select a trigger from Scene or its world gizmo."));
+            return;
+        }
+
+        bool deleteTrigger = DevToolWidgets.PaneTitleWithAction(
+            DevToolUiSettings.T("触发器", "Trigger"),
+            DevToolUiSettings.T("删除", "Delete"),
+            "DeleteTriggerTopRight",
+            tone: DevToolButtonTone.Danger);
+        if (deleteTrigger)
+        {
+            TriggerEditorCommandQueue.Enqueue(
+                new TriggerEditorCommand(
+                    TriggerEditorCommandKind.Delete,
+                    selected.Index));
+            return;
+        }
+
+        ImGui.Text(selected.Type);
+        DrawString(
+            selected,
+            TriggerEditorKeys.Name,
+            DevToolUiSettings.T("名称", "Name"),
+            selected.Name);
+        ImGui.TextDisabled(selected.Event?.HasEvent == true
+            ? DevToolUiSettings.T("事件 | ", "Event | ") + selected.Event.Type
+            : DevToolUiSettings.T("未分配事件", "No event assigned"));
+        ImGui.Separator();
+
+        ImGui.TextDisabled(DevToolUiSettings.T("触发条件", "ACTIVATION"));
+        DrawInt(selected, TriggerEditorKeys.ActiveFromCycle, DevToolUiSettings.T("起始周期", "From cycle"), selected.ActiveFromCycle, 0, 80);
+        DrawUpperCycle(selected);
+        DrawFloat(selected, TriggerEditorKeys.DelaySeconds, DevToolUiSettings.T("延迟（秒）", "Delay (seconds)"), selected.DelaySeconds, 0f, 120f);
+        DrawFloat(selected, TriggerEditorKeys.FireChance, DevToolUiSettings.T("触发概率", "Fire chance"), selected.FireChance, 0f, 1f);
+
+        bool multiUse = selected.MultiUse;
+        if (ImGui.Checkbox(DevToolUiSettings.T("允许多次触发##TriggerMultiUse", "Can fire multiple times##TriggerMultiUse"), ref multiUse))
+            SendValue(selected.Index, TriggerEditorKeys.MultiUse,
+                new EditorPropertyValue(EditorPropertyKind.Boolean, boolean: multiUse));
+
+        DrawKarma(selected);
+        DrawEntrance(snapshot, selected);
+
+        if (!string.IsNullOrEmpty(selected.CreatureType))
+        {
+            ImGui.Separator();
+            ImGui.TextDisabled(DevToolUiSettings.T("生物", "CREATURE"));
+            DrawString(selected, TriggerEditorKeys.CreatureType, DevToolUiSettings.T("生物类型", "Creature type"), selected.CreatureType);
+        }
+
+        ImGui.Separator();
+        DrawSlugcatCompactSelector(snapshot, selected);
+
+        ImGui.Separator();
+        DrawEventEditor(snapshot, selected);
+
+    }
+
+    private static void DrawLibrary(EditorTriggerPresentationSnapshot snapshot)
+    {
+        DevToolWidgets.FullWidthInputText(DevToolUiSettings.T("搜索", "Search"), "TriggerLibrarySearch", ref search, 128);
+        ImGui.Separator();
+
+        string[] types = snapshot.TriggerTypes ?? Array.Empty<string>();
+        EnsureTriggerTypeLabels(types);
+        string query = SearchQuery();
+        EnsureTriggerMatches(types, query);
+
+        using DevToolListClipper clipper = new(ProjectedTriggerMatches.Count);
+        while (clipper.Step(out int firstVisible, out int lastVisibleExclusive))
+        {
+            for (int visibleIndex = firstVisible; visibleIndex < lastVisibleExclusive; visibleIndex++)
+            {
+                int sourceIndex = ProjectedTriggerMatches[visibleIndex];
+                string type = types[sourceIndex];
+                if (ImGui.Selectable(projectedTriggerTypeLabels[sourceIndex], false))
+                    TriggerEditorCommandQueue.Enqueue(new TriggerEditorCommand(
+                        TriggerEditorCommandKind.Create,
+                        text: type));
+            }
+        }
+
+        if (ProjectedTriggerMatches.Count == 0)
+            DevToolWidgets.MutedText(DevToolUiSettings.T("没有匹配的触发器类型。", "No matching trigger types."), true);
+    }
+
+    internal static void DrawSceneWorkspace(EditorTriggerPresentationSnapshot snapshot)
+    {
+        if (snapshot == null || !snapshot.Available)
+        {
+            DevToolWidgets.MutedText(DevToolUiSettings.T("触发器场景不可用。", "Trigger scene unavailable."), true);
+            return;
+        }
+
+        EditorTriggerSnapshot[] triggers = snapshot.Triggers ?? Array.Empty<EditorTriggerSnapshot>();
+        EnsureSceneLabels(triggers);
+        ImGui.TextDisabled(DevToolUiSettings.T($"{triggers.Length} 个触发器", $"{triggers.Length} triggers"));
+        ImGui.Separator();
+
+        using DevToolListClipper clipper = new(triggers.Length);
+        while (clipper.Step(out int firstVisible, out int lastVisibleExclusive))
+        {
+            for (int i = firstVisible; i < lastVisibleExclusive; i++)
+            {
+                EditorTriggerSnapshot trigger = triggers[i];
+                if (ImGui.Selectable(projectedSceneLabels[i], trigger.Selected))
+                    TriggerEditorCommandQueue.Enqueue(new TriggerEditorCommand(TriggerEditorCommandKind.Select, trigger.Index));
+            }
+        }
+    }
+
+    private static void DrawEventEditor(EditorTriggerPresentationSnapshot snapshot, EditorTriggerSnapshot trigger)
+    {
+        ImGui.TextDisabled(DevToolUiSettings.T("事件", "EVENT"));
+        EditorTriggeredEventSnapshot value = trigger.Event ?? EmptyEvent;
+
+        string preview = value.HasEvent ? value.Type : DevToolUiSettings.T("无", "None");
+        if (ImGui.BeginCombo(DevToolUiSettings.T("类型##TriggerEventType", "Type##TriggerEventType"), preview))
+        {
+            bool noneSelected = !value.HasEvent;
+            if (ImGui.Selectable(DevToolUiSettings.T("无##TriggerEventNone", "None##TriggerEventNone"), noneSelected))
+                TriggerEditorCommandQueue.Enqueue(new TriggerEditorCommand(TriggerEditorCommandKind.ClearEvent, trigger.Index));
+            if (noneSelected) ImGui.SetItemDefaultFocus();
+
+            string[] eventTypes = snapshot.EventTypes ?? Array.Empty<string>();
+            EnsureEventTypeLabels(eventTypes);
+            for (int i = 0; i < eventTypes.Length; i++)
+            {
+                string type = eventTypes[i];
+                bool selected = value.HasEvent && string.Equals(value.Type, type, StringComparison.Ordinal);
+                if (ImGui.Selectable(projectedEventTypeLabels[i], selected))
+                    TriggerEditorCommandQueue.Enqueue(new TriggerEditorCommand(
+                        TriggerEditorCommandKind.SetEventType,
+                        index: trigger.Index,
+                        text: type));
+                if (selected) ImGui.SetItemDefaultFocus();
+            }
+            ImGui.EndCombo();
+        }
+
+        if (!value.HasEvent)
+        {
+            ImGui.TextWrapped(DevToolUiSettings.T("选择一种事件类型后再配置此触发器。", "Choose an event type to configure this trigger."));
+            return;
+        }
+
+        if (string.Equals(value.Type, "MusicEvent", StringComparison.Ordinal))
+        {
+            DrawMusicEvent(snapshot, trigger, value);
+            return;
+        }
+
+        if (string.Equals(value.Type, "StopMusicEvent", StringComparison.Ordinal))
+        {
+            DrawStopMusicEvent(snapshot, trigger, value);
+            return;
+        }
+
+        if (string.Equals(value.Type, "ShowProjectedImageEvent", StringComparison.Ordinal))
+        {
+            DrawProjectedImageEvent(trigger, value);
+            return;
+        }
+
+        ImGui.TextWrapped(value.Type);
+        ImGui.TextWrapped(DevToolUiSettings.T(
+            "该事件没有在这里暴露原版 Rain World 参数。",
+            "This event has no built-in Rain World parameters exposed here."));
+        ImGui.TextWrapped(DevToolUiSettings.T(
+            "该 Mod 添加的自定义 DevInterface 控件尚未映射到新检查器。",
+            "Custom DevInterface controls added by this mod are not mapped into the new inspector yet."));
+    }
+
+    private static void DrawMusicEvent(
+        EditorTriggerPresentationSnapshot snapshot,
+        EditorTriggerSnapshot trigger,
+        EditorTriggeredEventSnapshot value)
+    {
+        ImGui.TextDisabled(DevToolUiSettings.T("音乐", "MUSIC"));
+        DrawSongCombo(snapshot, trigger.Index, TriggerEventEditorKeys.SongName, DevToolUiSettings.T("歌曲", "Song"), value.SongName);
+        DrawEventFloat(trigger.Index, TriggerEventEditorKeys.Volume, DevToolUiSettings.T("音量", "Volume"), value.Volume, 0f, 1f);
+        DrawEventFloat(trigger.Index, TriggerEventEditorKeys.FadeInSeconds, DevToolUiSettings.T("淡入（秒）", "Fade in (seconds)"), value.FadeInSeconds, 0f, 15f);
+        DrawEventFloat(trigger.Index, TriggerEventEditorKeys.Priority, DevToolUiSettings.T("优先级", "Priority"), value.Priority, 0f, 1f);
+        DrawEventFloat(trigger.Index, TriggerEventEditorKeys.DroneTolerance, DevToolUiSettings.T("Drone 容忍度", "Drone tolerance"), value.DroneTolerance, 0f, 1f);
+        DrawEventFloat(trigger.Index, TriggerEventEditorKeys.MaxThreatLevel, DevToolUiSettings.T("威胁达到此值时淡出", "Fade out at threat"), value.MaxThreatLevel, 0f, 1f);
+        DrawOptionalEventInt(trigger.Index, TriggerEventEditorKeys.RoomsRange, DevToolUiSettings.T("房间切换数", "Room transitions"), value.RoomsRange, 0, 39, DevToolUiSettings.T("无限制", "Unlimited"));
+        DrawOptionalEventInt(trigger.Index, TriggerEventEditorKeys.CyclesRest, DevToolUiSettings.T("休息周期", "Rest cycles"), value.CyclesRest, 0, 79, DevToolUiSettings.T("仅一次", "One time"));
+
+        bool loop = value.Loop;
+        if (ImGui.Checkbox(DevToolUiSettings.T("循环##TriggerEventLoop", "Loop##TriggerEventLoop"), ref loop))
+            SendEventValue(trigger.Index, TriggerEventEditorKeys.Loop,
+                new EditorPropertyValue(EditorPropertyKind.Boolean, boolean: loop));
+
+        bool onePerCycle = value.OneSongPerCycle;
+        if (ImGui.Checkbox(DevToolUiSettings.T("每周期仅一首歌##TriggerEventOnePerCycle", "One song per cycle##TriggerEventOnePerCycle"), ref onePerCycle))
+            SendEventValue(trigger.Index, TriggerEventEditorKeys.OneSongPerCycle,
+                new EditorPropertyValue(EditorPropertyKind.Boolean, boolean: onePerCycle));
+
+        bool stopAtDeath = value.StopAtDeath;
+        if (ImGui.Checkbox(DevToolUiSettings.T("死亡时停止##TriggerEventStopDeath", "Stop at death##TriggerEventStopDeath"), ref stopAtDeath))
+            SendEventValue(trigger.Index, TriggerEventEditorKeys.StopAtDeath,
+                new EditorPropertyValue(EditorPropertyKind.Boolean, boolean: stopAtDeath));
+
+        bool stopAtGate = value.StopAtGate;
+        if (ImGui.Checkbox(DevToolUiSettings.T("进入业力门时停止##TriggerEventStopGate", "Stop at gate##TriggerEventStopGate"), ref stopAtGate))
+            SendEventValue(trigger.Index, TriggerEventEditorKeys.StopAtGate,
+                new EditorPropertyValue(EditorPropertyKind.Boolean, boolean: stopAtGate));
+    }
+
+    private static void DrawStopMusicEvent(
+        EditorTriggerPresentationSnapshot snapshot,
+        EditorTriggerSnapshot trigger,
+        EditorTriggeredEventSnapshot value)
+    {
+        ImGui.TextDisabled(DevToolUiSettings.T("停止音乐", "STOP MUSIC"));
+
+        string mode = value.StopMode ?? string.Empty;
+        if (ImGui.BeginCombo(DevToolUiSettings.T("停止模式##TriggerStopMode", "Stop mode##TriggerStopMode"), FriendlyStopMode(mode)))
+        {
+            DrawStopModeOption(trigger.Index, mode, "AllSongs", DevToolUiSettings.T("停止所有歌曲", "Stop all songs"));
+            DrawStopModeOption(trigger.Index, mode, "SpecificSong", DevToolUiSettings.T("停止指定歌曲", "Stop specific song"));
+            DrawStopModeOption(trigger.Index, mode, "AllButSpecific", DevToolUiSettings.T("停止除指定歌曲外的所有歌曲", "Stop all but specific song"));
+            ImGui.EndCombo();
+        }
+
+        DrawEventString(trigger.Index, TriggerEventEditorKeys.StopMode, DevToolUiSettings.T("自定义模式", "Custom mode"), mode);
+
+        if (!string.Equals(mode, "AllSongs", StringComparison.Ordinal))
+            DrawSongCombo(snapshot, trigger.Index, TriggerEventEditorKeys.SongName, DevToolUiSettings.T("歌曲", "Song"), value.SongName);
+
+        DrawEventFloat(trigger.Index, TriggerEventEditorKeys.Priority, DevToolUiSettings.T("优先级", "Priority"), value.Priority, 0f, 1f);
+        DrawEventFloat(trigger.Index, TriggerEventEditorKeys.FadeOutSeconds, DevToolUiSettings.T("淡出（秒）", "Fade out (seconds)"), value.FadeOutSeconds, 0f, 30f);
+    }
+
+    private static void DrawProjectedImageEvent(EditorTriggerSnapshot trigger, EditorTriggeredEventSnapshot value)
+    {
+        ImGui.TextDisabled(DevToolUiSettings.T("投影图像", "PROJECTED IMAGE"));
+
+        bool afterEncounter = value.AfterEncounter;
+        if (ImGui.Checkbox(DevToolUiSettings.T("遭遇后##TriggerProjectedAfter", "After encounter##TriggerProjectedAfter"), ref afterEncounter))
+            SendEventValue(trigger.Index, TriggerEventEditorKeys.AfterEncounter,
+                new EditorPropertyValue(EditorPropertyKind.Boolean, boolean: afterEncounter));
+
+        bool directionOnly = value.OnlyWhenShowingDirection;
+        if (ImGui.Checkbox(DevToolUiSettings.T("仅显示方向时##TriggerProjectedDirection", "Only when showing direction##TriggerProjectedDirection"), ref directionOnly))
+            SendEventValue(trigger.Index, TriggerEventEditorKeys.OnlyWhenShowingDirection,
+                new EditorPropertyValue(EditorPropertyKind.Boolean, boolean: directionOnly));
+
+        DrawEventInt(trigger.Index, TriggerEventEditorKeys.FromCycle, DevToolUiSettings.T("起始周期", "From cycle"), value.FromCycle, 0, 9999);
+    }
+
+    private static void DrawSongCombo(
+        EditorTriggerPresentationSnapshot snapshot,
+        int triggerIndex,
+        string key,
+        string label,
+        string current)
+    {
+        current ??= string.Empty;
+        EditBinding binding = GetBinding(triggerIndex, key, label, eventField: true);
+        if (ImGui.BeginCombo(binding.WidgetLabel,
+                string.IsNullOrEmpty(current) ? DevToolUiSettings.T("无歌曲", "NO SONG") : current))
+        {
+            string[] songs = snapshot.SongNames ?? Array.Empty<string>();
+            EnsureSongLabels(songs, key);
+            for (int i = 0; i < songs.Length; i++)
+            {
+                string song = songs[i];
+                bool selected = string.Equals(song, current, StringComparison.Ordinal);
+                if (ImGui.Selectable(projectedSongLabels[i], selected))
+                    SendEventValue(triggerIndex, key,
+                        new EditorPropertyValue(EditorPropertyKind.String, text: song));
+                if (selected) ImGui.SetItemDefaultFocus();
+            }
+            ImGui.EndCombo();
+        }
+
+        DrawEventString(triggerIndex, key, DevToolUiSettings.T("歌曲 ID", "Song ID"), current);
+    }
+
+    private static void DrawStopModeOption(int triggerIndex, string current, string value, string label)
+    {
+        bool selected = string.Equals(current, value, StringComparison.Ordinal);
+        string widget = GetBinding(triggerIndex, "stop-mode-option:" + value, label, eventField: true).WidgetLabel;
+        if (ImGui.Selectable(widget, selected))
+            SendEventValue(triggerIndex, TriggerEventEditorKeys.StopMode,
+                new EditorPropertyValue(EditorPropertyKind.String, text: value));
+        if (selected) ImGui.SetItemDefaultFocus();
+    }
+
+    private static string FriendlyStopMode(string mode) => mode switch
+    {
+        "AllSongs" => DevToolUiSettings.T("停止所有歌曲", "Stop all songs"),
+        "SpecificSong" => DevToolUiSettings.T("停止指定歌曲", "Stop specific song"),
+        "AllButSpecific" => DevToolUiSettings.T("停止除指定歌曲外的所有歌曲", "Stop all but specific song"),
+        _ => string.IsNullOrEmpty(mode) ? DevToolUiSettings.T("未知", "Unknown") : mode
+    };
+
+    private static void DrawUpperCycle(EditorTriggerSnapshot trigger)
+    {
+        bool noUpper = trigger.ActiveToCycle < 0;
+        bool editedNoUpper = noUpper;
+        if (ImGui.Checkbox(DevToolUiSettings.T("无结束周期##TriggerNoUpper", "No upper cycle##TriggerNoUpper"), ref editedNoUpper))
+        {
+            int next = editedNoUpper ? -1 : trigger.ActiveFromCycle;
+            SendValue(trigger.Index, TriggerEditorKeys.ActiveToCycle,
+                new EditorPropertyValue(EditorPropertyKind.Integer, integer: next));
+        }
+
+        if (noUpper) return;
+        DrawInt(trigger, TriggerEditorKeys.ActiveToCycle, DevToolUiSettings.T("截止周期", "Up to cycle"), trigger.ActiveToCycle,
+            trigger.ActiveFromCycle, 79);
+    }
+
+    private static void DrawKarma(EditorTriggerSnapshot trigger)
+    {
+        string[] labels = DevToolUiSettings.IsChinese ? KarmaLabelsChinese : KarmaLabelsEnglish;
+        int value = Math.Max(0, Math.Min(trigger.Karma, labels.Length - 1));
+        if (!ImGui.BeginCombo(DevToolUiSettings.T("业力要求##TriggerKarma", "Karma requirement##TriggerKarma"), labels[value])) return;
+        for (int i = 0; i < labels.Length; i++)
+        {
+            bool selected = i == value;
+            string optionLabel = GetBinding(trigger.Index, "karma:" + i, labels[i], eventField: false).WidgetLabel;
+            if (ImGui.Selectable(optionLabel, selected))
+                SendValue(trigger.Index, TriggerEditorKeys.Karma,
+                    new EditorPropertyValue(EditorPropertyKind.Integer, integer: i));
+            if (selected) ImGui.SetItemDefaultFocus();
+        }
+        ImGui.EndCombo();
+    }
+
+    private static void DrawEntrance(EditorTriggerPresentationSnapshot snapshot, EditorTriggerSnapshot trigger)
+    {
+        EnsureEntranceLabels(snapshot.EntranceCount);
+        string preview = trigger.Entrance < 0
+            ? DevToolUiSettings.T("任意入口", "Any entrance")
+            : DevToolUiSettings.T("入口 ", "Entrance ") + trigger.Entrance;
+        if (!ImGui.BeginCombo(DevToolUiSettings.T("入口要求##TriggerEntrance", "Entrance requirement##TriggerEntrance"), preview)) return;
+
+        if (ImGui.Selectable(DevToolUiSettings.T("任意入口##TriggerEntranceAny", "Any entrance##TriggerEntranceAny"), trigger.Entrance < 0))
+            SendValue(trigger.Index, TriggerEditorKeys.Entrance,
+                new EditorPropertyValue(EditorPropertyKind.Integer, integer: -1));
+
+        for (int i = 0; i < snapshot.EntranceCount; i++)
+        {
+            bool selected = trigger.Entrance == i;
+            if (ImGui.Selectable(projectedEntranceLabels[i], selected))
+                SendValue(trigger.Index, TriggerEditorKeys.Entrance,
+                    new EditorPropertyValue(EditorPropertyKind.Integer, integer: i));
+            if (selected) ImGui.SetItemDefaultFocus();
+        }
+        ImGui.EndCombo();
+    }
+
+    private static void DrawSlugcatCompactSelector(
+        EditorTriggerPresentationSnapshot snapshot,
+        EditorTriggerSnapshot trigger)
+    {
+        string[] all =
+            snapshot.SlugcatNames ?? Array.Empty<string>();
+        string[] allowed =
+            trigger.AllowedSlugcats ?? Array.Empty<string>();
+        EnsureSlugcatLabels(all);
+
+        string preview =
+            SlugcatSelectionSummary(all, allowed);
+
+        if (!ImGui.BeginCombo(
+                DevToolUiSettings.T(
+                    "适用角色##TriggerSlugcatCombo",
+                    "Allowed slugcats##TriggerSlugcatCombo"),
+                preview))
+            return;
+
+        if (ImGui.SmallButton(
+                DevToolUiSettings.T(
+                    "全选##TriggerSlugcatsAll",
+                    "All##TriggerSlugcatsAll")))
+        {
+            TriggerEditorCommandQueue.Enqueue(
+                new TriggerEditorCommand(
+                    TriggerEditorCommandKind.SetSlugcats,
+                    index: trigger.Index,
+                    texts: (string[])all.Clone()));
+        }
+
+        ImGui.SameLine();
+        if (ImGui.SmallButton(
+                DevToolUiSettings.T(
+                    "清空##TriggerSlugcatsNone",
+                    "Clear##TriggerSlugcatsNone")))
+        {
+            TriggerEditorCommandQueue.Enqueue(
+                new TriggerEditorCommand(
+                    TriggerEditorCommandKind.SetSlugcats,
+                    index: trigger.Index,
+                    texts: Array.Empty<string>()));
+        }
+
+        ImGui.Separator();
+
+        for (int i = 0; i < all.Length; i++)
+        {
+            string name =
+                all[i];
+            bool selected =
+                Contains(allowed, name);
+
+            bool value = selected;
+            if (ImGui.Checkbox(
+                    projectedSlugcatLabels[i],
+                    ref value))
+            {
+                TriggerEditorCommandQueue.Enqueue(
+                    new TriggerEditorCommand(
+                        TriggerEditorCommandKind.ToggleSlugcat,
+                        index: trigger.Index,
+                        text: name));
+            }
+        }
+
+        ImGui.EndCombo();
+    }
+
+    private static string SlugcatSelectionSummary(
+        string[] all,
+        string[] allowed)
+    {
+        all ??= Array.Empty<string>();
+        allowed ??= Array.Empty<string>();
+
+        int selectedCount = 0;
+        string first = string.Empty;
+        string second = string.Empty;
+
+        for (int i = 0; i < all.Length; i++)
+        {
+            string name =
+                all[i];
+            if (!Contains(allowed, name))
+                continue;
+
+            if (selectedCount == 0)
+                first = name;
+            else if (selectedCount == 1)
+                second = name;
+
+            selectedCount++;
+        }
+
+        if (selectedCount == 0)
+            return DevToolUiSettings.T("无", "None");
+        if (all.Length > 0 && selectedCount == all.Length)
+            return DevToolUiSettings.T("全部", "All");
+        if (selectedCount == 1)
+            return first;
+        if (selectedCount == 2)
+            return first + " + " + second;
+
+        return first +
+               " + " +
+               second +
+               " +" +
+               (selectedCount - 2);
+    }
+
+    private static void DrawInt(EditorTriggerSnapshot trigger, string key, string label, int current, int min, int max)
+    {
+        EditBinding binding = GetBinding(trigger.Index, key, label, eventField: false);
+        DevToolNumericEditResult<int> edit = DevToolNumericWidgets.InputInt(
+            DevToolNumericScope.Trigger,
+            binding.StateKey,
+            binding.WidgetLabel,
+            current,
+            instance: trigger.Index,
+            min: min,
+            max: max);
+        if (edit.Committed)
+            SendValue(trigger.Index, key, new EditorPropertyValue(EditorPropertyKind.Integer, integer: edit.Value));
+    }
+
+    private static void DrawFloat(EditorTriggerSnapshot trigger, string key, string label, float current, float min, float max)
+    {
+        EditBinding binding = GetBinding(trigger.Index, key, label, eventField: false);
+        DevToolNumericEditResult<float> edit = DevToolNumericWidgets.SliderFloat(
+            DevToolNumericScope.Trigger,
+            binding.StateKey,
+            binding.WidgetLabel,
+            current,
+            min,
+            max,
+            instance: trigger.Index);
+        if (edit.Committed)
+            SendValue(trigger.Index, key, new EditorPropertyValue(EditorPropertyKind.Float, x: edit.Value));
+    }
+
+    private static void DrawVector(EditorTriggerSnapshot trigger, string key, string label, float x, float y)
+    {
+        EditBinding binding = GetBinding(trigger.Index, key, label, eventField: false);
+        Num.Vector2 value = Get(VectorEdits, binding.StateKey, new Num.Vector2(x, y));
+        bool changed = ImGui.InputFloat2(binding.WidgetLabel, ref value, "%.2f");
+        VectorEdits[binding.StateKey] = value;
+        if (ImGui.IsItemDeactivatedAfterEdit())
+            SendValue(trigger.Index, key,
+                new EditorPropertyValue(EditorPropertyKind.Vector2, x: value.X, y: value.Y));
+        else if (!changed && !ImGui.IsItemActive())
+            VectorEdits[binding.StateKey] = new Num.Vector2(x, y);
+    }
+
+    private static void DrawString(EditorTriggerSnapshot trigger, string key, string label, string current)
+    {
+        EditBinding binding = GetBinding(trigger.Index, key, label, eventField: false);
+        string value = Get(StringEdits, binding.StateKey, current ?? string.Empty);
+        bool changed = ImGui.InputText(binding.WidgetLabel, ref value, 128);
+        StringEdits[binding.StateKey] = value;
+        if (ImGui.IsItemDeactivatedAfterEdit())
+            SendValue(trigger.Index, key, new EditorPropertyValue(EditorPropertyKind.String, text: value));
+        else if (!changed && !ImGui.IsItemActive())
+            StringEdits[binding.StateKey] = current ?? string.Empty;
+    }
+
+    private static void DrawEventFloat(int triggerIndex, string key, string label, float current, float min, float max)
+    {
+        EditBinding binding = GetBinding(triggerIndex, key, label, eventField: true);
+        DevToolNumericEditResult<float> edit = DevToolNumericWidgets.SliderFloat(
+            DevToolNumericScope.Trigger,
+            binding.StateKey,
+            binding.WidgetLabel,
+            current,
+            min,
+            max,
+            instance: triggerIndex);
+        if (edit.Committed)
+            SendEventValue(triggerIndex, key, new EditorPropertyValue(EditorPropertyKind.Float, x: edit.Value));
+    }
+
+    private static void DrawEventInt(int triggerIndex, string key, string label, int current, int min, int max)
+    {
+        EditBinding binding = GetBinding(triggerIndex, key, label, eventField: true);
+        DevToolNumericEditResult<int> edit = DevToolNumericWidgets.InputInt(
+            DevToolNumericScope.Trigger,
+            binding.StateKey,
+            binding.WidgetLabel,
+            current,
+            instance: triggerIndex,
+            min: min,
+            max: max);
+        if (edit.Committed)
+            SendEventValue(triggerIndex, key, new EditorPropertyValue(EditorPropertyKind.Integer, integer: edit.Value));
+    }
+
+    private static void DrawOptionalEventInt(
+        int triggerIndex,
+        string key,
+        string label,
+        int current,
+        int min,
+        int max,
+        string negativeLabel)
+    {
+        bool negative = current < 0;
+        bool editedNegative = negative;
+        EditBinding binding = GetBinding(triggerIndex, key, negativeLabel, eventField: true);
+        if (ImGui.Checkbox(binding.OptionalLabel, ref editedNegative))
+        {
+            int next = editedNegative ? -1 : min;
+            SendEventValue(triggerIndex, key,
+                new EditorPropertyValue(EditorPropertyKind.Integer, integer: next));
+        }
+
+        if (!negative)
+            DrawEventInt(triggerIndex, key, label, current, min, max);
+    }
+
+    private static void DrawEventString(int triggerIndex, string key, string label, string current)
+    {
+        EditBinding binding = GetBinding(triggerIndex, key, label, eventField: true);
+        string value = Get(StringEdits, binding.StateKey, current ?? string.Empty);
+        bool changed = ImGui.InputText(binding.WidgetLabel, ref value, 256);
+        StringEdits[binding.StateKey] = value;
+        if (ImGui.IsItemDeactivatedAfterEdit())
+            SendEventValue(triggerIndex, key, new EditorPropertyValue(EditorPropertyKind.String, text: value));
+        else if (!changed && !ImGui.IsItemActive())
+            StringEdits[binding.StateKey] = current ?? string.Empty;
+    }
+
+    private static EditorTriggerSnapshot FindSelected(EditorTriggerPresentationSnapshot snapshot)
+    {
+        EditorTriggerSnapshot[] triggers = snapshot.Triggers ?? Array.Empty<EditorTriggerSnapshot>();
+        int index = snapshot.SelectedIndex;
+        return index >= 0 && index < triggers.Length ? triggers[index] : null;
+    }
+
+    private static void SendValue(int index, string key, EditorPropertyValue value) =>
+        TriggerEditorCommandQueue.Enqueue(new TriggerEditorCommand(
+            TriggerEditorCommandKind.SetValue,
+            index: index,
+            key: key,
+            value: value));
+
+    private static void SendEventValue(int index, string key, EditorPropertyValue value) =>
+        TriggerEditorCommandQueue.Enqueue(new TriggerEditorCommand(
+            TriggerEditorCommandKind.SetEventValue,
+            index: index,
+            key: key,
+            value: value));
+
+    private static bool Contains(string[] values, string value)
+    {
+        if (values == null) return false;
+        for (int i = 0; i < values.Length; i++)
+            if (string.Equals(values[i], value, StringComparison.Ordinal)) return true;
+        return false;
+    }
+
+    private static void EnsureTriggerTypeLabels(string[] types)
+    {
+        if (ReferenceEquals(projectedTriggerTypes, types)) return;
+        string[] labels = new string[types.Length];
+        for (int i = 0; i < types.Length; i++)
+            labels[i] = (types[i] ?? string.Empty) + "##CreateTrigger" + i;
+        projectedTriggerTypes = types;
+        projectedTriggerTypeLabels = labels;
+    }
+
+    private static void EnsureTriggerMatches(string[] types, string query)
+    {
+        query ??= string.Empty;
+        if (ReferenceEquals(projectedTriggerMatchTypes, types) &&
+            string.Equals(projectedTriggerMatchSearch, query, StringComparison.Ordinal))
+            return;
+
+        ProjectedTriggerMatches.Clear();
+        for (int i = 0; i < types.Length; i++)
+        {
+            if (Matches(types[i], query))
+                ProjectedTriggerMatches.Add(i);
+        }
+
+        projectedTriggerMatchTypes = types;
+        projectedTriggerMatchSearch = query;
+    }
+
+    private static void EnsureSceneLabels(EditorTriggerSnapshot[] triggers)
+    {
+        if (ReferenceEquals(projectedSceneTriggers, triggers)) return;
+        string[] labels = new string[triggers.Length];
+        for (int i = 0; i < triggers.Length; i++)
+        {
+            EditorTriggerSnapshot trigger = triggers[i];
+            if (trigger == null)
+            {
+                labels[i] = "##TriggerSceneMissing" + i;
+                continue;
+            }
+            string label =
+                string.IsNullOrWhiteSpace(trigger.Name)
+                    ? trigger.Type ?? string.Empty
+                    : trigger.Name + "  [" + (trigger.Type ?? string.Empty) + "]";
+            if (trigger.Event?.HasEvent == true) label += "  ->  " + trigger.Event.Type;
+            labels[i] = label + "##TriggerScene" + trigger.Index;
+        }
+        projectedSceneTriggers = triggers;
+        projectedSceneLabels = labels;
+    }
+
+    private static void EnsureEventTypeLabels(string[] types)
+    {
+        if (ReferenceEquals(projectedEventTypes, types)) return;
+        string[] labels = new string[types.Length];
+        for (int i = 0; i < types.Length; i++)
+            labels[i] = (types[i] ?? string.Empty) + "##TriggerEventType" + i;
+        projectedEventTypes = types;
+        projectedEventTypeLabels = labels;
+    }
+
+    private static void EnsureSongLabels(string[] songs, string key)
+    {
+        key ??= string.Empty;
+        if (ReferenceEquals(projectedSongs, songs) &&
+            string.Equals(projectedSongKey, key, StringComparison.Ordinal)) return;
+        string[] labels = new string[songs.Length];
+        for (int i = 0; i < songs.Length; i++)
+            labels[i] = (songs[i] ?? string.Empty) + "##TriggerSong" + key + i;
+        projectedSongs = songs;
+        projectedSongKey = key;
+        projectedSongLabels = labels;
+    }
+
+    private static void EnsureSlugcatLabels(string[] names)
+    {
+        if (ReferenceEquals(projectedSlugcats, names)) return;
+        string[] labels = new string[names.Length];
+        for (int i = 0; i < names.Length; i++)
+            labels[i] = (names[i] ?? string.Empty) + "##TriggerSlugcat" + i;
+        projectedSlugcats = names;
+        projectedSlugcatLabels = labels;
+    }
+
+    private static void EnsureEntranceLabels(int count)
+    {
+        bool chinese = DevToolUiSettings.IsChinese;
+        if (projectedEntranceCount == count && projectedEntranceChinese == chinese) return;
+        string[] labels = new string[Math.Max(0, count)];
+        string prefix = DevToolUiSettings.T("入口 ", "Entrance ");
+        for (int i = 0; i < labels.Length; i++)
+            labels[i] = prefix + i + "##TriggerEntrance" + i;
+        projectedEntranceCount = count;
+        projectedEntranceChinese = chinese;
+        projectedEntranceLabels = labels;
+    }
+
+    private static EditBinding GetBinding(int index, string key, string label, bool eventField)
+    {
+        EditBindingKey cacheKey = new(index, key, label, eventField, DevToolUiSettings.IsChinese);
+        if (EditBindings.TryGetValue(cacheKey, out EditBinding binding)) return binding;
+
+        string stateKey = eventField
+            ? "event:" + index + ":" + key
+            : index + ":" + key;
+        binding = new EditBinding
+        {
+            StateKey = stateKey,
+            WidgetLabel = (label ?? string.Empty) + "##Trigger" + stateKey,
+            OptionalLabel = (label ?? string.Empty) + "##TriggerOptional" + index + key
+        };
+        if (EditBindings.Count > 1024) EditBindings.Clear();
+        EditBindings[cacheKey] = binding;
+        return binding;
+    }
+
+    private static string SearchQuery()
+    {
+        if (string.Equals(observedSearch, search, StringComparison.Ordinal)) return normalizedSearch;
+        observedSearch = search;
+        normalizedSearch = search?.Trim() ?? string.Empty;
+        return normalizedSearch;
+    }
+
+    private static bool Matches(string value, string normalizedQuery) =>
+        string.IsNullOrEmpty(normalizedQuery) ||
+        (!string.IsNullOrEmpty(value) && value.IndexOf(normalizedQuery, StringComparison.OrdinalIgnoreCase) >= 0);
+
+    private static TValue Get<TValue>(Dictionary<string, TValue> dictionary, string key, TValue fallback)
+    {
+        if (dictionary.TryGetValue(key, out TValue value)) return value;
+        dictionary[key] = fallback;
+        return fallback;
+    }
+}

@@ -1,0 +1,30 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup><TargetFramework>net10.0</TargetFramework><OutputType>Exe</OutputType><LangVersion>13</LangVersion><ImplicitUsings>enable</ImplicitUsings><Nullable>disable</Nullable><NoWarn>$(NoWarn);CS0649</NoWarn><DefineConstants>$(DefineConstants);RAINWRIGHT_RUNTIME</DefineConstants></PropertyGroup>
+  <ItemGroup>
+    <Compile Include="../ModificationFiles.Tests/Stubs.cs" Link="SourceStubs.cs" />
+    <Compile Include="../../src/Rainwright/Backend/World/WorldDocument.cs" Link="Production/WorldDocument.cs" />
+    <Compile Include="../../src/Rainwright/Backend/World/WorldConnectionToken.cs" Link="Production/WorldConnectionToken.cs" />
+    <Compile Include="../../src/Rainwright/Backend/World/WorldFileVariants.cs" Link="Production/WorldFileVariants.cs" />
+    <Compile Include="../../src/Rainwright/Backend/World/WorldVariantFileTransaction.cs" Link="Production/WorldVariantFileTransaction.cs" />
+    <Compile Include="../../src/Rainwright/Backend/Authoring/EditorRegionVariantContributors.cs" Link="Production/EditorRegionVariantContributors.cs" />
+    <Compile Include="../../src/Rainwright/Game/DevTool/World/WorldFileVariantStore.cs" Link="Production/WorldFileVariantStore.cs" />
+    <Compile Include="../../src/Rainwright/Backend/World/ModificationFileComposer.cs" Link="Production/ModificationFileComposer.cs" />
+    <Compile Include="../../src/Rainwright/Game/DevTool/World/WorldTextRegistry.cs" Link="Production/WorldTextRegistry.cs" />
+    <Compile Include="../../src/Rainwright/Game/DevTool/World/WorldRoomRegistration.cs" Link="Production/WorldRoomRegistration.cs" />
+    <Compile Include="../../src/Rainwright/Backend/Map/RoomMapGeometry.cs" Link="Production/RoomMapGeometry.cs" />
+    <Compile Include="../../src/Rainwright/Backend/Map/LegacyMapLayoutMigration.cs" Link="Production/LegacyMapLayoutMigration.cs" />
+    <Compile Include="../../src/Rainwright/Backend/Map/PlayerMapRoomVisibility.cs" Link="Production/PlayerMapRoomVisibility.cs" />
+    <Compile Include="../../src/Rainwright/Backend/Map/PlayerMapRoomNamePolicy.cs" Link="Production/PlayerMapRoomNamePolicy.cs" />
+    <Compile Include="../../src/Rainwright/Backend/Presentation/RoomMapBakeSnapshots.cs" Link="Production/RoomMapBakeSnapshots.cs" />
+    <Compile Include="../../src/Rainwright/Game/DevTool/Core/EditorSlowOperation.cs" Link="Production/EditorSlowOperation.cs" />
+    <Compile Include="../../src/Rainwright/Game/DevTool/World/WorldSourceFailureRetry.cs" Link="Production/WorldSourceFailureRetry.cs" />
+    <Compile Include="../../src/Rainwright/Game/DevTool/World/WorldSourceDirectoryWatcher.cs" Link="Production/WorldSourceDirectoryWatcher.cs" />
+    <Compile Include="../../src/Rainwright/Game/DevTool/World/WorldLineageRegistry.cs" Link="Production/WorldLineageRegistry.cs" />
+    <Compile Include="../../src/Rainwright/Game/DevTool/World/WorldCreatureLiveReload.cs" Link="Production/WorldCreatureLiveReload.cs" />
+    <Compile Include="../../src/Rainwright/Game/DevTool/World/WorldCreatureAuthoringHooks.cs" Link="Production/WorldCreatureAuthoringHooks.cs" />
+    <Compile Include="../../src/Rainwright/Game/DevTool/World/WorldAuthoringPathResolver.cs" Link="Production/WorldAuthoringPathResolver.cs" />
+    <Compile Include="../../src/Rainwright/Game/DevTool/World/WorldModificationWorkspace.cs" Link="Production/WorldModificationWorkspace.cs" />
+    <Compile Include="../../src/Shared/AuthoringSourcePaths.cs" Link="Production/AuthoringSourcePaths.cs" />
+  </ItemGroup>
+  <ItemGroup><Compile Include="../../src/Rainwright/Backend/Core/EditorBackupFiles.cs" Link="Production/EditorBackupFiles.cs" /></ItemGroup>
+</Project>

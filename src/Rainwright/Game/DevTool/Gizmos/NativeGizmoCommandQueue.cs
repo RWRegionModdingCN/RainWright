@@ -1,0 +1,276 @@
+using System;
+using System.Collections.Concurrent;
+using DryCycle.DevUI.DevTool.Core;
+using DryCycle.DevUI.DevTool.History;
+using DryCycle.DevUI.DevTool.Objects;
+using DryCycle.DevUI.DevTool.Sound;
+using DryCycle.DevUI.DevTool.Triggers;
+using UnityEngine;
+
+namespace DryCycle.DevUI.DevTool.Gizmos;
+
+internal static class NativeGizmoCommandProcessor
+{
+    internal static void Process(EditorSession session)
+    {
+        while (NativeGizmoCommandQueue.TryDequeue(out NativeGizmoCommand command))
+        {
+            try
+            {
+                switch (command.Kind)
+                {
+                    case NativeGizmoCommandKind.Select:
+                        Select(session, command);
+                        break;
+                    case NativeGizmoCommandKind.Begin:
+                        Begin(session, command);
+                        break;
+                    case NativeGizmoCommandKind.Update:
+                        Update(session, command);
+                        break;
+                    case NativeGizmoCommandKind.Commit:
+                    {
+                        bool committed = EditorContinuousTransactionHub.Commit(session, Key(command));
+                        if (committed && command.Target == NativeGizmoTargetKind.ObjectPosition)
+                            NativeObjectRuntimeReconciler.FinalizeInteractiveMutation(
+                                session,
+                                ObjectAt(session, command.Index, command.StableId));
+                        break;
+                    }
+                    case NativeGizmoCommandKind.Cancel:
+                        EditorContinuousTransactionHub.Cancel(session, Key(command));
+                        MarkChanged(session, command.Target, command.Index, command.StableId);
+                        break;
+                }
+            }
+            catch (Exception error)
+            {
+                global::DryCycle.DevUI.DevTool.Core.EditorDiagnostics.LogSource?.LogWarning("DevTool native gizmo command failed: " + error.Message);
+            }
+        }
+    }
+
+    internal static void Clear() => NativeGizmoCommandQueue.Clear();
+
+    private static void Select(EditorSession session, NativeGizmoCommand command)
+    {
+        if (session == null) return;
+        switch (command.Target)
+        {
+            case NativeGizmoTargetKind.ObjectPosition:
+            {
+                PlacedObject target = ObjectAt(session, command.Index, command.StableId);
+                if (target != null) session.Selection.SelectOnly(target);
+                break;
+            }
+            case NativeGizmoTargetKind.SoundPosition:
+            case NativeGizmoTargetKind.SoundRadius:
+            case NativeGizmoTargetKind.SoundDirection:
+                if (SoundAt(session, command.Index) != null)
+                    SoundEditorStateHub.Get(session)?.SetSelectedIndex(command.Index);
+                break;
+            case NativeGizmoTargetKind.TriggerPosition:
+            case NativeGizmoTargetKind.TriggerRadius:
+                if (TriggerAt(session, command.Index) != null)
+                    TriggerEditorStateHub.Get(session)?.SetSelectedIndex(command.Index);
+                break;
+        }
+    }
+
+    private static void Begin(EditorSession session, NativeGizmoCommand command)
+    {
+        if (session == null) return;
+
+        if (command.Target == NativeGizmoTargetKind.ObjectPosition)
+        {
+            PlacedObject objectTarget = ObjectAt(session, command.Index, command.StableId);
+            NativeObjectRuntimeReconciler.PrepareForMutation(session, objectTarget);
+        }
+
+        IEditorStateSnapshot before = command.Target switch
+        {
+            NativeGizmoTargetKind.ObjectPosition =>
+                SinglePlacedObjectStateSnapshot.Capture(
+                    session.RoomSettings,
+                    ObjectAt(session, command.Index, command.StableId)),
+            NativeGizmoTargetKind.SoundPosition or
+            NativeGizmoTargetKind.SoundRadius or
+            NativeGizmoTargetKind.SoundDirection =>
+                SingleAmbientSoundStateSnapshot.Capture(session.RoomSettings, SoundAt(session, command.Index)),
+            NativeGizmoTargetKind.TriggerPosition or
+            NativeGizmoTargetKind.TriggerRadius =>
+                SingleTriggerStateSnapshot.Capture(session.RoomSettings, TriggerAt(session, command.Index)),
+            _ => null
+        };
+
+        if (before != null)
+            EditorContinuousTransactionHub.Begin(session, Key(command), Label(command.Target), before);
+    }
+
+    private static void Update(EditorSession session, NativeGizmoCommand command)
+    {
+        if (session == null || !EditorContinuousTransactionHub.IsActive(session, Key(command)))
+            return;
+
+        bool changed = command.Target switch
+        {
+            NativeGizmoTargetKind.ObjectPosition => SetObjectPosition(
+                session,
+                command.Index,
+                command.StableId,
+                command.X,
+                command.Y),
+            NativeGizmoTargetKind.SoundPosition => SetSoundPosition(session, command.Index, command.X, command.Y),
+            NativeGizmoTargetKind.SoundRadius => SetSoundRadius(session, command.Index, command.X),
+            NativeGizmoTargetKind.SoundDirection => SetSoundDirection(session, command.Index, command.X, command.Y),
+            NativeGizmoTargetKind.TriggerPosition => SetTriggerPosition(session, command.Index, command.X, command.Y),
+            NativeGizmoTargetKind.TriggerRadius => SetTriggerRadius(session, command.Index, command.X, command.Y),
+            _ => false
+        };
+
+        if (changed)
+            MarkChanged(session, command.Target, command.Index, command.StableId);
+    }
+
+    private static bool SetObjectPosition(
+        EditorSession session,
+        int index,
+        long stableId,
+        float x,
+        float y)
+    {
+        PlacedObject target = ObjectAt(session, index, stableId);
+        if (target == null) return false;
+        Vector2 next = new(x, y);
+        if ((target.pos - next).sqrMagnitude <= 0.000001f) return false;
+        target.pos = next;
+        NativeObjectRuntimeReconciler.RefreshInteractivePreview(session, target);
+        return true;
+    }
+
+    private static bool SetSoundPosition(EditorSession session, int index, float x, float y)
+    {
+        if (SoundAt(session, index) is not SpotSound sound || sound.inherited) return false;
+        Vector2 next = new(x, y);
+        if ((sound.pos - next).sqrMagnitude <= 0.000001f) return false;
+        sound.pos = next;
+        return true;
+    }
+
+    private static bool SetSoundRadius(EditorSession session, int index, float radius)
+    {
+        if (SoundAt(session, index) is not SpotSound sound || sound.inherited) return false;
+        float next = Mathf.Max(0f, radius);
+        if (Mathf.Approximately(sound.rad, next)) return false;
+        Vector2 direction = sound.radHandlePosition.sqrMagnitude > 0.0001f
+            ? sound.radHandlePosition.normalized
+            : Vector2.right;
+        sound.rad = next;
+        sound.radHandlePosition = direction * next;
+        return true;
+    }
+
+    private static bool SetSoundDirection(EditorSession session, int index, float x, float y)
+    {
+        if (SoundAt(session, index) is not DirectionalSound sound || sound.inherited) return false;
+        Vector2 raw = new(x, y);
+        Vector2 next = raw.sqrMagnitude > 0.0001f ? raw.normalized : Vector2.down;
+        if ((sound.direction - next).sqrMagnitude <= 0.000001f) return false;
+        sound.direction = next;
+        return true;
+    }
+
+    private static bool SetTriggerPosition(EditorSession session, int index, float x, float y)
+    {
+        if (TriggerAt(session, index) is not SpotTrigger trigger) return false;
+        Vector2 next = new(x, y);
+        if ((trigger.pos - next).sqrMagnitude <= 0.000001f) return false;
+        trigger.pos = next;
+        return true;
+    }
+
+    private static bool SetTriggerRadius(
+        EditorSession session,
+        int index,
+        float handleX,
+        float handleY)
+    {
+        if (TriggerAt(session, index) is not SpotTrigger trigger)
+            return false;
+
+        Vector2 handle =
+            new(handleX, handleY);
+        float radius =
+            handle.magnitude;
+
+        if (Mathf.Approximately(trigger.rad, radius) &&
+            (trigger.radHandlePosition - handle).sqrMagnitude <= 0.000001f)
+            return false;
+
+        // Preserve the full authored handle vector. Its magnitude is the radius and its direction
+        // is the 360-degree gizmo angle, matching Rain World's SpotTrigger model.
+        trigger.rad =
+            radius;
+        trigger.radHandlePosition =
+            handle;
+        return true;
+    }
+
+    private static void MarkChanged(
+        EditorSession session,
+        NativeGizmoTargetKind target,
+        int index,
+        long stableId = 0L)
+    {
+        switch (target)
+        {
+            case NativeGizmoTargetKind.ObjectPosition:
+                EditorRevisionHub.Mark(session, EditorRevisionKind.Objects);
+                ObjectPresentationChangeHintHub.MarkMember(session, ObjectAt(session, index, stableId));
+                break;
+            case NativeGizmoTargetKind.SoundPosition:
+            case NativeGizmoTargetKind.SoundRadius:
+            case NativeGizmoTargetKind.SoundDirection:
+                EditorRevisionHub.Mark(session, EditorRevisionKind.Sound);
+                SoundPresentationChangeHintHub.MarkMember(session, index);
+                break;
+            case NativeGizmoTargetKind.TriggerPosition:
+            case NativeGizmoTargetKind.TriggerRadius:
+                EditorRevisionHub.Mark(session, EditorRevisionKind.Triggers);
+                TriggerPresentationChangeHintHub.MarkMember(session, index);
+                break;
+        }
+    }
+
+    private static PlacedObject ObjectAt(EditorSession session, int index, long stableId = 0L) =>
+        ObjectPresentationIdentity.Resolve(session?.RoomSettings?.placedObjects, index, stableId);
+
+    private static AmbientSound SoundAt(EditorSession session, int index) =>
+        session?.RoomSettings?.ambientSounds != null && index >= 0 && index < session.RoomSettings.ambientSounds.Count
+            ? session.RoomSettings.ambientSounds[index]
+            : null;
+
+    private static EventTrigger TriggerAt(EditorSession session, int index) =>
+        session?.RoomSettings?.triggers != null && index >= 0 && index < session.RoomSettings.triggers.Count
+            ? session.RoomSettings.triggers[index]
+            : null;
+
+    private static string Key(NativeGizmoCommand command)
+    {
+        long address = command.Target == NativeGizmoTargetKind.ObjectPosition && command.StableId != 0L
+            ? command.StableId
+            : command.Index;
+        return "NativeGizmo:" + (int)command.Target + ":" + address;
+    }
+
+    private static string Label(NativeGizmoTargetKind target) => target switch
+    {
+        NativeGizmoTargetKind.ObjectPosition => "Move object",
+        NativeGizmoTargetKind.SoundPosition => "Move sound",
+        NativeGizmoTargetKind.SoundRadius => "Change sound radius",
+        NativeGizmoTargetKind.SoundDirection => "Change sound direction",
+        NativeGizmoTargetKind.TriggerPosition => "Move trigger",
+        NativeGizmoTargetKind.TriggerRadius => "Change trigger radius",
+        _ => "Gizmo edit"
+    };
+}

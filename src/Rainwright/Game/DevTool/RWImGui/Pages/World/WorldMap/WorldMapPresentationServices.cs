@@ -1,0 +1,606 @@
+using System;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.Threading;
+using BepInEx.Logging;
+using DryCycle.DevUI.DevTool.Core;
+using DryCycle.DevUI.DevTool.Map;
+using UnityEngine;
+
+namespace DryCycle.DevUI.DevTool.RWImGui;
+
+/// <summary>
+/// Snapshot-local lookup/cache service for World Map presentation.
+/// This replaces the old catch-all performance plugin without owning routing or rendering policy.
+/// </summary>
+internal static class WorldMapPresentationIndex
+{
+    private sealed class SnapshotIndex
+    {
+        internal EditorMapPresentationSnapshot Snapshot;
+        internal readonly Dictionary<int, EditorMapRoomSnapshot> RoomsByIndex = new();
+        internal readonly Dictionary<string, EditorMapConnectionSnapshot> ConnectionsById =
+            new(StringComparer.Ordinal);
+        internal readonly Dictionary<long, EditorMapConnectionSnapshot> ConnectionsByEndpoint = new();
+    }
+
+    private static readonly object BuildGate = new();
+    private static SnapshotIndex indexed;
+    private static int visualResetGeneration;
+
+    [ThreadStatic] private static Dictionary<int, EditorMapRoomVisualSnapshot> threadRoomVisuals;
+    [ThreadStatic] private static int threadGeometryGeneration;
+    [ThreadStatic] private static int threadVisualResetGeneration;
+
+    internal static EditorMapRoomVisualSnapshot GetRoomVisual(int roomIndex)
+    {
+        int geometryGeneration =
+            MapRoomGeometryPresentationHub.PublishedGeneration;
+        int resetGeneration = Volatile.Read(ref visualResetGeneration);
+        Dictionary<int, EditorMapRoomVisualSnapshot> cache =
+            threadRoomVisuals ??= new Dictionary<int, EditorMapRoomVisualSnapshot>();
+
+        if (threadGeometryGeneration != geometryGeneration ||
+            threadVisualResetGeneration != resetGeneration)
+        {
+            threadGeometryGeneration = geometryGeneration;
+            threadVisualResetGeneration = resetGeneration;
+            cache.Clear();
+        }
+
+        if (cache.TryGetValue(roomIndex, out EditorMapRoomVisualSnapshot cached))
+            return cached;
+
+        EditorMapRoomVisualSnapshot visual =
+            MapRoomGeometryPresentationHub.Get(roomIndex) ??
+            EditorMapRoomVisualSnapshot.Empty;
+        cache[roomIndex] = visual;
+        return visual;
+    }
+
+    internal static EditorMapRoomSnapshot FindRoom(
+        EditorMapPresentationSnapshot snapshot,
+        int roomIndex)
+    {
+        SnapshotIndex state = Ensure(snapshot);
+        return state.RoomsByIndex.TryGetValue(
+            roomIndex,
+            out EditorMapRoomSnapshot room)
+                ? room
+                : null;
+    }
+
+    internal static EditorMapConnectionSnapshot FindConnection(
+        EditorMapPresentationSnapshot snapshot,
+        string id)
+    {
+        if (string.IsNullOrEmpty(id)) return null;
+        SnapshotIndex state = Ensure(snapshot);
+        return state.ConnectionsById.TryGetValue(
+            id,
+            out EditorMapConnectionSnapshot connection)
+                ? connection
+                : null;
+    }
+
+    internal static EditorMapConnectionSnapshot FindConnectionAtEndpoint(
+        EditorMapPresentationSnapshot snapshot,
+        int roomIndex,
+        int nodeIndex)
+    {
+        SnapshotIndex state = Ensure(snapshot);
+        return state.ConnectionsByEndpoint.TryGetValue(
+            EndpointKey(roomIndex, nodeIndex),
+            out EditorMapConnectionSnapshot connection)
+                ? connection
+                : null;
+    }
+
+    internal static bool IsEndpointFree(
+        EditorMapPresentationSnapshot snapshot,
+        int roomIndex,
+        EditorMapRoomNodeSnapshot node)
+    {
+        if (node == null || !node.Exit || node.ConnectedRoomIndex >= 0)
+            return false;
+
+        SnapshotIndex state = Ensure(snapshot);
+        return !state.ConnectionsByEndpoint.ContainsKey(
+            EndpointKey(roomIndex, node.NodeIndex));
+    }
+
+    internal static void Reset()
+    {
+        Volatile.Write(ref indexed, null);
+        Interlocked.Increment(ref visualResetGeneration);
+    }
+
+    private static SnapshotIndex Ensure(EditorMapPresentationSnapshot snapshot)
+    {
+        SnapshotIndex current = Volatile.Read(ref indexed);
+        if (current != null && ReferenceEquals(current.Snapshot, snapshot))
+            return current;
+
+        lock (BuildGate)
+        {
+            current = Volatile.Read(ref indexed);
+            if (current != null && ReferenceEquals(current.Snapshot, snapshot))
+                return current;
+
+            SnapshotIndex built = Build(snapshot);
+            Volatile.Write(ref indexed, built);
+            return built;
+        }
+    }
+
+    private static SnapshotIndex Build(EditorMapPresentationSnapshot snapshot)
+    {
+        SnapshotIndex built = new() { Snapshot = snapshot };
+
+        EditorMapRoomSnapshot[] rooms =
+            snapshot?.Rooms ?? Array.Empty<EditorMapRoomSnapshot>();
+        for (int i = 0; i < rooms.Length; i++)
+        {
+            EditorMapRoomSnapshot room = rooms[i];
+            if (room != null)
+                built.RoomsByIndex[room.RoomIndex] = room;
+        }
+
+        EditorMapConnectionSnapshot[] connections =
+            snapshot?.Connections ?? Array.Empty<EditorMapConnectionSnapshot>();
+        for (int i = 0; i < connections.Length; i++)
+        {
+            EditorMapConnectionSnapshot connection = connections[i];
+            if (connection == null) continue;
+
+            if (!string.IsNullOrEmpty(connection.ConnectionId))
+                built.ConnectionsById[connection.ConnectionId] = connection;
+
+            long from = EndpointKey(
+                connection.FromRoomIndex,
+                connection.FromNodeIndex);
+            if (!built.ConnectionsByEndpoint.ContainsKey(from))
+                built.ConnectionsByEndpoint[from] = connection;
+
+            if (connection.ToNodeIndex < 0) continue;
+            long to = EndpointKey(
+                connection.ToRoomIndex,
+                connection.ToNodeIndex);
+            if (!built.ConnectionsByEndpoint.ContainsKey(to))
+                built.ConnectionsByEndpoint[to] = connection;
+        }
+
+        return built;
+    }
+
+    private static long EndpointKey(int roomIndex, int nodeIndex) =>
+        ((long)(uint)roomIndex << 32) | (uint)nodeIndex;
+}
+
+/// <summary>
+/// Low-frequency publication/prime throttle for detached map presentation data.
+/// It is an explicit frontend service owned by BridgePlugin, not a self-starting compatibility plugin.
+/// </summary>
+internal static class WorldMapUpdateThrottle
+{
+    private const int PreviewPrimeIntervalFrames = 2;
+
+    private static readonly FrontendHookLedger callbackLease = new();
+    private static bool enabled;
+
+    private static int lastPublishFrame = -1000;
+    private static string lastPublishRegion = string.Empty;
+    private static int lastPublishSelection = int.MinValue;
+    private static int lastPublishCurrentRoom = int.MinValue;
+
+    private static int lastGeometryPrimeFrame = -1000;
+    private static string lastGeometryRegion = string.Empty;
+    private static int lastGeometrySelection = int.MinValue;
+    private static int lastGeometryCurrentRoom = int.MinValue;
+
+    private static int lastShortcutPrimeFrame = -1000;
+    private static string lastShortcutRegion = string.Empty;
+    private static int lastShortcutSelection = int.MinValue;
+    private static int lastShortcutCurrentRoom = int.MinValue;
+
+    internal static void Enable(ManualLogSource log)
+    {
+        if (enabled) return;
+        if (callbackLease.HasActiveRegistrations)
+            throw new InvalidOperationException(
+                "World Map throttle cannot enable while callback cleanup remains pending.");
+
+        ResetState();
+        WorldMapPresentationIndex.Reset();
+        try
+        {
+            callbackLease.Install("WorldMap.ShouldPublish",
+                () => WorldMapFrontendBridge.RegisterShouldPublish(ShouldPublish),
+                () => WorldMapFrontendBridge.UnregisterShouldPublish(ShouldPublish));
+            callbackLease.Install("WorldMap.ShouldPrimeGeometry",
+                () => WorldMapFrontendBridge.RegisterShouldPrimeGeometry(ShouldPrimeGeometry),
+                () => WorldMapFrontendBridge.UnregisterShouldPrimeGeometry(ShouldPrimeGeometry));
+            enabled = true;
+            log?.LogInfo("World Map V2 presentation throttle enabled.");
+        }
+        catch
+        {
+            enabled = false;
+            callbackLease.ReleaseAll();
+            throw;
+        }
+    }
+
+    internal static void Disable()
+    {
+        enabled = false;
+        if (!callbackLease.ReleaseAll())
+            throw new InvalidOperationException(
+                "World Map throttle callback cleanup failed; retry before enabling.");
+        WorldMapPresentationIndex.Reset();
+        ResetState();
+    }
+
+    internal static bool ShouldPublish(EditorSession session)
+    {
+        if (!enabled) return true;
+
+        if (session?.ToolMode != EditorToolMode.Map)
+        {
+            lastPublishFrame = -1000;
+            lastPublishRegion = string.Empty;
+            lastPublishSelection = int.MinValue;
+            lastPublishCurrentRoom = int.MinValue;
+            return true;
+        }
+
+        string region = session.World?.name ?? string.Empty;
+        int selected = MapEditorStateHub.Get(session)?.SelectedRoomIndex ?? -1;
+        int currentRoom = session.Room?.abstractRoom?.index ?? -1;
+        bool urgent =
+            !MapEditorPresentationHub.Current.Available ||
+            !string.Equals(region, lastPublishRegion, StringComparison.OrdinalIgnoreCase) ||
+            selected != lastPublishSelection ||
+            currentRoom != lastPublishCurrentRoom;
+
+        if (!urgent && WorldMapBackgroundBudget.InteractionActive)
+            return false;
+
+        int publishInterval =
+            WorldMapBackgroundSchedulingPolicy.SnapshotIntervalFrames(
+                overlayVisible:
+                    !EditorUiModeState.OverlayHidden);
+
+        if (!urgent &&
+            Time.frameCount - lastPublishFrame < publishInterval)
+            return false;
+
+        lastPublishFrame = Time.frameCount;
+        lastPublishRegion = region;
+        lastPublishSelection = selected;
+        lastPublishCurrentRoom = currentRoom;
+        return true;
+    }
+
+    internal static bool ShouldPrimeGeometry(EditorSession session)
+    {
+        if (!enabled) return true;
+        if (WorldMapBackgroundBudget.InteractionActive) return false;
+
+        string region = session?.World?.name ?? string.Empty;
+        int selected = MapEditorStateHub.Get(session)?.SelectedRoomIndex ?? -1;
+        int currentRoom = session?.Room?.abstractRoom?.index ?? -1;
+        bool urgent =
+            !string.Equals(region, lastGeometryRegion, StringComparison.OrdinalIgnoreCase) ||
+            selected != lastGeometrySelection ||
+            currentRoom != lastGeometryCurrentRoom;
+
+        int interval = PreviewPrimeIntervalFrames;
+        if (!WorldMapRetainedV2Runtime.CanvasVisible)
+        {
+            bool incomplete =
+                !MapRoomGeometryPresentationHub.SourceRecoverySessionComplete ||
+                !WorldMapRetainedV2Runtime.Resources.ThumbnailLoadComplete;
+            double catchupAge =
+                Math.Max(
+                    MapRoomGeometryPresentationHub.SourceRecoverySessionElapsedMilliseconds,
+                    WorldMapRetainedV2Runtime.Resources.ThumbnailLoadElapsedMilliseconds);
+            interval =
+                WorldMapBackgroundSchedulingPolicy.GeometrySweepIntervalFrames(
+                    canvasVisible: false,
+                    thumbnailWorkIncomplete: incomplete,
+                    catchupAgeMilliseconds: catchupAge);
+        }
+
+        if (!urgent &&
+            Time.frameCount - lastGeometryPrimeFrame < interval)
+            return false;
+
+        lastGeometryPrimeFrame = Time.frameCount;
+        lastGeometryRegion = region;
+        lastGeometrySelection = selected;
+        lastGeometryCurrentRoom = currentRoom;
+        return true;
+    }
+
+    internal static bool ShouldPrimeShortcuts(
+        EditorSession session,
+        int selectedRoomIndex)
+    {
+        if (!enabled) return true;
+        if (WorldMapBackgroundBudget.InteractionActive) return false;
+
+        string region = session?.World?.name ?? string.Empty;
+        int currentRoom = session?.Room?.abstractRoom?.index ?? -1;
+        bool urgent =
+            !string.Equals(region, lastShortcutRegion, StringComparison.OrdinalIgnoreCase) ||
+            selectedRoomIndex != lastShortcutSelection ||
+            currentRoom != lastShortcutCurrentRoom;
+
+        int interval =
+            WorldMapBackgroundSchedulingPolicy.ShortcutPrimeIntervalFrames(
+                WorldMapRetainedV2Runtime.CanvasVisible);
+
+        if (!urgent &&
+            Time.frameCount - lastShortcutPrimeFrame < interval)
+            return false;
+
+        lastShortcutPrimeFrame = Time.frameCount;
+        lastShortcutRegion = region;
+        lastShortcutSelection = selectedRoomIndex;
+        lastShortcutCurrentRoom = currentRoom;
+        return true;
+    }
+
+    private static void ResetState()
+    {
+        lastPublishFrame = -1000;
+        lastPublishRegion = string.Empty;
+        lastPublishSelection = int.MinValue;
+        lastPublishCurrentRoom = int.MinValue;
+        lastGeometryPrimeFrame = -1000;
+        lastGeometryRegion = string.Empty;
+        lastGeometrySelection = int.MinValue;
+        lastGeometryCurrentRoom = int.MinValue;
+        lastShortcutPrimeFrame = -1000;
+        lastShortcutRegion = string.Empty;
+        lastShortcutSelection = int.MinValue;
+        lastShortcutCurrentRoom = int.MinValue;
+    }
+}
+
+[Flags]
+internal enum WorldMapInteractionKind
+{
+    None = 0,
+    Viewport = 1,
+    RoomDrag = 2,
+    Linking = 4
+}
+
+/// <summary>
+/// Main-thread background work budget. Interaction kinds are tracked independently so pure viewport
+/// navigation can freeze route/source work while room dragging still receives a bounded route budget.
+/// Stable frames advance background jobs at their normal bounded cadence.
+/// </summary>
+internal static class WorldMapBackgroundBudget
+{
+    private const int ShortcutSweepIntervalFrames = 4;
+    private const int InteractionCooldownMilliseconds = 90;
+
+    private static volatile bool enabled;
+    // Geometry publication owns exactly one backend callback. If a partially
+    // attached delegate refuses to unregister, the lease blocks reactivation.
+    private static readonly FrontendHookLedger callbackLease = new();
+    private static int lastGeometrySweepFrame = -1000;
+    private static int lastSourceRecoveryFrame = -1000;
+    private static int lastShortcutSweepFrame = -1000;
+    private static string geometryRegion = string.Empty;
+    private static string sourceRecoveryRegion = string.Empty;
+    private static string shortcutRegion = string.Empty;
+    private static long viewportUntilTimestamp;
+    private static long roomDragUntilTimestamp;
+    private static long linkingUntilTimestamp;
+
+    internal static void Enable(ManualLogSource logger)
+    {
+        if (enabled) return;
+        if (callbackLease.HasActiveRegistrations)
+            throw new InvalidOperationException(
+                "World Map background budget cannot enable before callback cleanup succeeds.");
+        ResetState();
+        try
+        {
+            callbackLease.Install("WorldMap.GeometryBackgroundBudget",
+                () => WorldMapFrontendBridge.RegisterGeometryBackgroundBudget(ShouldProcessGeometry),
+                () => WorldMapFrontendBridge.UnregisterGeometryBackgroundBudget(ShouldProcessGeometry));
+            enabled = true;
+            logger?.LogInfo("World Map V2 background budget enabled.");
+        }
+        catch
+        {
+            enabled = false;
+            callbackLease.ReleaseAll();
+            throw;
+        }
+    }
+
+    internal static void Disable()
+    {
+        enabled = false;
+        bool released = callbackLease.ReleaseAll();
+        ResetState();
+        if (!released)
+            throw new InvalidOperationException(
+                "World Map background budget callback cleanup failed; retry before enabling.");
+    }
+
+    internal static bool InteractionActive =>
+        ViewportInteractionActive ||
+        RoomDragInteractionActive ||
+        LinkingInteractionActive;
+
+    internal static bool ViewportInteractionActive =>
+        enabled && TimestampActive(ref viewportUntilTimestamp);
+
+    internal static bool RoomDragInteractionActive =>
+        enabled && TimestampActive(ref roomDragUntilTimestamp);
+
+    internal static bool LinkingInteractionActive =>
+        enabled && TimestampActive(ref linkingUntilTimestamp);
+
+    internal static void NoteInteraction(WorldMapInteractionKind kind)
+    {
+        if (!enabled || kind == WorldMapInteractionKind.None) return;
+
+        long cooldown =
+            Math.Max(
+                1L,
+                Stopwatch.Frequency * InteractionCooldownMilliseconds / 1000L);
+        long target = Stopwatch.GetTimestamp() + cooldown;
+
+        if ((kind & WorldMapInteractionKind.Viewport) != 0)
+            ExtendUntil(ref viewportUntilTimestamp, target);
+        if ((kind & WorldMapInteractionKind.RoomDrag) != 0)
+            ExtendUntil(ref roomDragUntilTimestamp, target);
+        if ((kind & WorldMapInteractionKind.Linking) != 0)
+            ExtendUntil(ref linkingUntilTimestamp, target);
+    }
+
+    internal static int RouteBuildBudget(int idleBudget, int roomDragBudget)
+    {
+        if (!enabled) return Math.Max(0, idleBudget);
+        if (RoomDragInteractionActive)
+            return Math.Max(0, roomDragBudget);
+        if (ViewportInteractionActive || LinkingInteractionActive)
+            return 0;
+        return Math.Max(0, idleBudget);
+    }
+
+    internal static bool AllowSourceRecovery(
+        EditorSession session)
+    {
+        if (!enabled)
+            return true;
+        if (InteractionActive)
+            return false;
+
+        string region =
+            session?.World?.name ?? string.Empty;
+        if (!string.Equals(
+                region,
+                sourceRecoveryRegion,
+                StringComparison.OrdinalIgnoreCase))
+        {
+            sourceRecoveryRegion = region;
+            lastSourceRecoveryFrame = -1000;
+        }
+
+        bool canvasVisible =
+            WorldMapRetainedV2Runtime.CanvasVisible;
+        int interval =
+            WorldMapBackgroundSchedulingPolicy.SourceRecoveryIntervalFrames(
+                canvasVisible,
+                recoveryIncomplete:
+                    !MapRoomGeometryPresentationHub.SourceRecoverySessionComplete,
+                recoveryAgeMilliseconds:
+                    MapRoomGeometryPresentationHub.SourceRecoverySessionElapsedMilliseconds);
+
+        if (Time.frameCount - lastSourceRecoveryFrame < interval)
+            return false;
+
+        lastSourceRecoveryFrame = Time.frameCount;
+        return true;
+    }
+
+    internal static bool ShouldProcessGeometry(global::World world)
+    {
+        if (EditorUiModeState.UseVanilla || DevToolRuntime.ActiveSession?.LegacyUiVisible == true) return false;
+        if (!enabled) return true;
+        if (InteractionActive) return false;
+
+        string region = world?.name ?? string.Empty;
+        if (!string.Equals(region, geometryRegion, StringComparison.OrdinalIgnoreCase))
+        {
+            geometryRegion = region;
+            lastGeometrySweepFrame = Time.frameCount;
+            return false;
+        }
+
+        // OH/hidden UI must keep preparing thumbnails, but there is no reason to spend the
+        // visible-map cadence forever after the background queue has converged. Catch up at a
+        // moderate cadence while either MapTex recovery or retained thumbnail population is still
+        // incomplete, then fall back to a low-frequency maintenance sweep.
+        bool canvasVisible =
+            WorldMapRetainedV2Runtime.CanvasVisible;
+        bool incomplete =
+            !MapRoomGeometryPresentationHub.SourceRecoverySessionComplete ||
+            !WorldMapRetainedV2Runtime.Resources.ThumbnailLoadComplete;
+        double catchupAge =
+            Math.Max(
+                MapRoomGeometryPresentationHub.SourceRecoverySessionElapsedMilliseconds,
+                WorldMapRetainedV2Runtime.Resources.ThumbnailLoadElapsedMilliseconds);
+        int interval =
+            WorldMapBackgroundSchedulingPolicy.GeometrySweepIntervalFrames(
+                canvasVisible,
+                incomplete,
+                catchupAge);
+        if (Time.frameCount - lastGeometrySweepFrame < interval)
+            return false;
+
+        lastGeometrySweepFrame = Time.frameCount;
+        return true;
+    }
+
+    internal static bool ShouldProcessShortcuts()
+    {
+        if (EditorUiModeState.UseVanilla || DevToolRuntime.ActiveSession?.LegacyUiVisible == true) return false;
+        if (!enabled) return true;
+        if (InteractionActive) return false;
+
+        string region =
+            DevToolRuntime.ActiveSession?.World?.name ?? string.Empty;
+        if (!string.Equals(
+                region,
+                shortcutRegion,
+                StringComparison.OrdinalIgnoreCase))
+        {
+            shortcutRegion = region;
+            lastShortcutSweepFrame = Time.frameCount;
+            return false;
+        }
+
+        if (Time.frameCount - lastShortcutSweepFrame < ShortcutSweepIntervalFrames)
+            return false;
+
+        lastShortcutSweepFrame = Time.frameCount;
+        return true;
+    }
+
+    private static bool TimestampActive(ref long timestamp) =>
+        Stopwatch.GetTimestamp() <= Interlocked.Read(ref timestamp);
+
+    private static void ExtendUntil(ref long timestamp, long target)
+    {
+        while (true)
+        {
+            long current = Interlocked.Read(ref timestamp);
+            if (current >= target) return;
+            if (Interlocked.CompareExchange(ref timestamp, target, current) == current)
+                return;
+        }
+    }
+
+    private static void ResetState()
+    {
+        lastGeometrySweepFrame = -1000;
+        lastSourceRecoveryFrame = -1000;
+        lastShortcutSweepFrame = -1000;
+        geometryRegion = string.Empty;
+        sourceRecoveryRegion = string.Empty;
+        shortcutRegion = string.Empty;
+        Interlocked.Exchange(ref viewportUntilTimestamp, 0L);
+        Interlocked.Exchange(ref roomDragUntilTimestamp, 0L);
+        Interlocked.Exchange(ref linkingUntilTimestamp, 0L);
+    }
+}

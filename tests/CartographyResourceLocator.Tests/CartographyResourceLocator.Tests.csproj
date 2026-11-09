@@ -1,0 +1,21 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <LangVersion>13</LangVersion>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="../../src/Rainwright/Backend/Cartography/CartographyResourceLocator.cs"
+             Link="Production/CartographyResourceLocator.cs" />
+    <EmbeddedResource Include="Fixtures/NewObjects.txt"
+                      LogicalName="Rainwright.Cartography.Objects.png" />
+    <EmbeddedResource Include="Fixtures/LegacyObjects.txt"
+                      LogicalName="DryCycle.Cartography.Objects.png" />
+    <EmbeddedResource Include="Fixtures/LegacyOnly.txt"
+                      LogicalName="DryCycle.Cartography.LegacyOnly.png" />
+    <EmbeddedResource Include="Fixtures/NewOnly.txt"
+                      LogicalName="Rainwright.Cartography.NewOnly.png" />
+  </ItemGroup>
+</Project>

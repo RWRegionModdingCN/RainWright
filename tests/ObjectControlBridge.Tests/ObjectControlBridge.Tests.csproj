@@ -1,0 +1,10 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup><OutputType>Exe</OutputType><TargetFramework>net10.0</TargetFramework><LangVersion>13</LangVersion><Nullable>disable</Nullable></PropertyGroup>
+  <ItemGroup>
+    <Compile Include="../../src/Rainwright/Game/DevTool/Compatibility/LegacyDevInterfaceBridge.cs" Link="Production/LegacyDevInterfaceBridge.cs" />
+    <Compile Include="../../src/Rainwright/Backend/Compatibility/LegacyControlSnapshot.cs" Link="Production/LegacyControlSnapshot.cs" />
+    <Compile Include="../../src/Rainwright/Game/DevTool/Compatibility/ObjectCompatibilityTransactions.cs" Link="Production/ObjectCompatibilityTransactions.cs" />
+    <Compile Include="../../src/Rainwright/Game/DevTool/Compatibility/LegacyControlReflection.cs" Link="Production/LegacyControlReflection.cs" />
+    <Compile Include="../../src/Rainwright/Game/DevTool/Compatibility/LegacyNodePosition.cs" Link="Production/LegacyNodePosition.cs" />
+  </ItemGroup>
+</Project>

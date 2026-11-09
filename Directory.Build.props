@@ -1,0 +1,14 @@
+<Project>
+  <Import Project="$(MSBuildThisFileDirectory)Directory.Build.local.props" Condition="Exists('$(MSBuildThisFileDirectory)Directory.Build.local.props')" />
+  <PropertyGroup>
+    <RainWrightBuildRoot Condition="'$(RainWrightBuildRoot)' == ''">$(MSBuildThisFileDirectory)artifacts</RainWrightBuildRoot>
+    <RainWrightBuildRoot>$([System.IO.Path]::GetFullPath('$(RainWrightBuildRoot)'))</RainWrightBuildRoot>
+    <BaseIntermediateOutputPath>$(RainWrightBuildRoot)/obj/$(MSBuildProjectName)/</BaseIntermediateOutputPath>
+    <BaseIntermediateOutputPath Condition="'$(MSBuildProjectName)' == 'Rainwright' and '$(RainwrightStandaloneSmokeTest)' == 'true'">$(RainWrightBuildRoot)/obj/$(MSBuildProjectName)/net10-smoke/</BaseIntermediateOutputPath>
+    <BaseIntermediateOutputPath Condition="'$(MSBuildProjectName)' == 'Rainwright' and '$(RainwrightStandaloneSmokeTest)' != 'true' and '$(RainWrightPortableBuild)' == 'true'">$(RainWrightBuildRoot)/obj/$(MSBuildProjectName)/net48-core/</BaseIntermediateOutputPath>
+    <MSBuildProjectExtensionsPath>$(BaseIntermediateOutputPath)</MSBuildProjectExtensionsPath>
+    <BaseOutputPath>$(RainWrightBuildRoot)/bin/$(MSBuildProjectName)/</BaseOutputPath>
+    <DefaultItemExcludes>$(DefaultItemExcludes);**/bin/**;**/obj/**;**/artifacts/**</DefaultItemExcludes>
+    <DeployToGame Condition="'$(DeployToGame)' == ''">false</DeployToGame>
+  </PropertyGroup>
+</Project>

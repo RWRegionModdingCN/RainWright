@@ -1,0 +1,18 @@
+{
+  "id": "rainwright",
+  "name": "RainWright",
+  "version": "0.1.14",
+  "hide_version": false,
+  "authors": "NR",
+  "description": "RainWright is an independent UI tool for Rain World region creators, designed to provide a more modern, intuitive and efficient development experience.<LINE><LINE>RainWright redesigns the page layout and interactions of the vanilla Dev Tools and integrates the features of World Editor and Cornifer into one visual workspace.<LINE><LINE>Built around familiar workflows and developer needs, RainWright adds two-way room connections, hot reloading for connection changes and creature spawns, custom sound grouping and management, more human-friendly shortcuts, and automatic save recovery to simplify content creation and debugging.",
+  "requirements": [
+    "rwimgui"
+  ],
+  "requirements_names": [
+    "Rain World ImGUI API (1.12.0 or later)"
+  ],
+  "tags": [
+    "Tools"
+  ],
+  "checksum_override_version": false
+}

@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <LangVersion>13</LangVersion>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+  </PropertyGroup>
+  <ItemGroup>
+    <!-- Build the real Rainwright sources as net10 only for this runtime smoke;
+         the preceding CI step separately compiles the production net48 DLL. -->
+    <ProjectReference Include="../../src/Rainwright/Rainwright.csproj" />
+  </ItemGroup>
+</Project>

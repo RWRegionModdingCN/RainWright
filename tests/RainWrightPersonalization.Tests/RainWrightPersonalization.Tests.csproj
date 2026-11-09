@@ -1,0 +1,21 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType><TargetFramework>net10.0</TargetFramework>
+    <LangVersion>13</LangVersion><Nullable>disable</Nullable><ImplicitUsings>enable</ImplicitUsings>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="../../src/Rainwright/Backend/Settings/RainWrightPersonalSettings.cs" Link="Production/Preferences.cs" />
+    <Compile Include="../../src/Rainwright/Backend/Core/EditorDocumentIdentity.cs" Link="Production/Identity.cs" />
+    <Compile Include="../../src/Rainwright/Backend/Core/DevToolShortcutRegistry.cs" Link="Production/Shortcuts.cs" />
+    <Compile Include="../../src/Rainwright/Backend/Core/EditorShortcutFeedback.cs" Link="Production/Feedback.cs" />
+    <Compile Include="../../src/Rainwright/Backend/AutoSave/RainwrightAutoSaveSettingsStore.cs" Link="Production/AutoSaveStore.cs" />
+    <Compile Include="../../src/Rainwright/Backend/Input/RainwrightShortcutInputSettingsStore.cs" Link="Production/InputStore.cs" />
+    <Compile Include="../../src/Rainwright/Game/DevTool/AutoSave/EditorAutoSavePreferences.cs" Link="Production/AutoSavePreferences.cs" />
+    <Compile Include="../../src/Rainwright/Game/DevTool/Input/EditorShortcutGameplayPolicy.cs" Link="Production/InputPolicy.cs" />
+    <Compile Include="../../src/Rainwright/Game/DevTool/Input/RainWrightShortcutInput.cs" Link="Production/KeyInput.cs" />
+    <Compile Include="../../src/Rainwright/Game/DevTool/RWImGui/Settings/DevToolUserSettingsStore.cs" Link="Production/UiStore.cs" />
+    <Compile Include="../../src/Rainwright/Game/DevTool/Personalization/RainWrightWorkspaceRuntime.cs" Link="Production/WorkspaceRuntime.cs" />
+    <Compile Include="../Shared/UiSettingsStubs.cs" Link="Fixture/UiSettings.cs" />
+  </ItemGroup>
+  <ItemGroup><Compile Include="../../src/Rainwright/Backend/Core/EditorBackupFiles.cs" Link="Production/EditorBackupFiles.cs" /></ItemGroup>
+</Project>

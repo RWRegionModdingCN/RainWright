@@ -1,0 +1,668 @@
+using System;
+using System.Collections.Generic;
+using ImGuiNET;
+using Num = System.Numerics;
+
+namespace DryCycle.DevUI.DevTool.RWImGui;
+
+/// <summary>
+/// Stable scope names for shared scalar numeric editors.
+/// State identity is (scope, instance, key), so callers do not need per-frame concatenated IDs.
+/// </summary>
+internal static class DevToolNumericScope
+{
+    internal const string Room = "Room";
+    internal const string Relationship = "Relationship";
+    internal const string Trigger = "Trigger";
+    internal const string SoundRoom = "SoundRoom";
+    internal const string SoundRoomBackgroundDrone = "SoundRoom.BackgroundDrone";
+    internal const string SoundRoomNoThreatDrone = "SoundRoom.NoThreatDrone";
+    internal const string SoundItem = "SoundItem";
+    internal const string Universal = "Universal";
+    internal const string ObjectTransform = "ObjectTransform";
+    internal const string ObjectProperty = "ObjectProperty";
+    internal const string ObjectLegacy = "ObjectLegacy";
+}
+
+internal readonly struct DevToolNumericEditResult<T>
+{
+    internal DevToolNumericEditResult(T value, bool committed)
+    {
+        Value = value;
+        Committed = committed;
+    }
+
+    internal T Value { get; }
+    internal bool Committed { get; }
+}
+
+/// <summary>
+/// Shared human-facing edit transaction for scalar ImGui numeric controls.
+///
+/// Semantics:
+/// - Drag / Ctrl+Click text entry owns a local dirty value while the widget is active.
+/// - Mouse release, Enter, or clicking elsewhere commits exactly once.
+/// - A committed value remains visible until the authoritative backend snapshot acknowledges it,
+///   preventing the one-frame "snap back" that made typed values look rejected.
+/// - Slider text entry is clamped to the same range as dragging.
+///
+/// Only active dirty/pending edits are retained. A low-frequency stale audit removes abandoned
+/// transactions when a control disappears immediately after editing (delete, page switch, etc.).
+/// </summary>
+internal static class DevToolNumericWidgets
+{
+    private const int PendingAckFrameLimit = 12;
+    private const int StaleStateFrameLimit = 600;
+    private const int PruneIntervalFrames = 120;
+
+    private readonly struct EditKey : IEquatable<EditKey>
+    {
+        internal EditKey(string scope, int instance, string key)
+        {
+            Scope = scope ?? string.Empty;
+            Instance = instance;
+            Key = key ?? string.Empty;
+        }
+
+        internal string Scope { get; }
+        internal int Instance { get; }
+        internal string Key { get; }
+
+        public bool Equals(EditKey other) =>
+            Instance == other.Instance &&
+            string.Equals(Scope, other.Scope, StringComparison.Ordinal) &&
+            string.Equals(Key, other.Key, StringComparison.Ordinal);
+
+        public override bool Equals(object obj) => obj is EditKey other && Equals(other);
+
+        public override int GetHashCode()
+        {
+            unchecked
+            {
+                int hash = StringComparer.Ordinal.GetHashCode(Scope);
+                hash = (hash * 397) ^ Instance;
+                hash = (hash * 397) ^ StringComparer.Ordinal.GetHashCode(Key);
+                return hash;
+            }
+        }
+    }
+
+    private struct FloatState
+    {
+        internal float LocalValue;
+        internal bool Dirty;
+        internal bool Pending;
+        internal float PendingValue;
+        internal int SubmittedFrame;
+        internal int LastTouchedFrame;
+    }
+
+    private struct IntState
+    {
+        internal int LocalValue;
+        internal bool Dirty;
+        internal bool Pending;
+        internal int PendingValue;
+        internal int SubmittedFrame;
+        internal int LastTouchedFrame;
+    }
+
+    private static readonly Dictionary<EditKey, FloatState> FloatStates = new();
+    private static readonly Dictionary<EditKey, IntState> IntStates = new();
+    private static readonly HashSet<EditKey> FloatTextEditors = new();
+    private static readonly HashSet<EditKey> FloatTextEditorFocusPending = new();
+
+    // Rotary dragging has explicit pointer ownership instead of relying only on ImGui's global
+    // ActiveId. This guarantees that two rotary widgets drawn in the same top bar can never consume
+    // the same MouseDelta, even if a backend/column transition briefly reports overlapping active
+    // state while the pointer crosses between them.
+    private static EditKey? activeRotaryDragKey;
+
+    private static readonly List<EditKey> StaleKeys = new();
+    private static int nextPruneFrame;
+
+    internal static DevToolNumericEditResult<float> SliderFloat(
+        string scope,
+        string stateKey,
+        string label,
+        float authoritativeValue,
+        float min,
+        float max,
+        string format = "%.3f",
+        int instance = -1)
+    {
+        int frame = PrepareFrame();
+        EditKey key = new(scope, instance, stateKey);
+        FloatState state = BeginFloat(key, authoritativeValue, frame);
+        float value = state.LocalValue;
+        bool changed = ImGui.SliderFloat(
+            label,
+            ref value,
+            min,
+            max,
+            format,
+            ImGuiSliderFlags.AlwaysClamp);
+        return EndFloat(key, authoritativeValue, value, changed, state, frame);
+    }
+
+    internal static DevToolNumericEditResult<float> InputFloat(
+        string scope,
+        string stateKey,
+        string label,
+        float authoritativeValue,
+        float step = 0.1f,
+        string format = "%.3f",
+        int instance = -1)
+    {
+        int frame = PrepareFrame();
+        EditKey key = new(scope, instance, stateKey);
+        FloatState state = BeginFloat(key, authoritativeValue, frame);
+        float value = state.LocalValue;
+        bool changed = ImGui.InputFloat(label, ref value, step, 0f, format);
+        return EndFloat(key, authoritativeValue, value, changed, state, frame);
+    }
+
+    internal static DevToolNumericEditResult<float> RotaryFloat(
+        string scope,
+        string stateKey,
+        float authoritativeValue,
+        float min,
+        float max,
+        float diameter = 54f,
+        string displayFormat = "0.000",
+        int instance = -1,
+        float? resetValue = null)
+    {
+        int frame = PrepareFrame();
+        EditKey key = new(scope, instance, stateKey);
+        FloatState state = BeginFloat(key, authoritativeValue, frame);
+        float value = state.LocalValue;
+        bool changed = false;
+
+        ImGui.PushID(scope);
+        ImGui.PushID(instance);
+        ImGui.PushID(stateKey);
+
+        if (FloatTextEditors.Contains(key))
+        {
+            ImGui.SetNextItemWidth(Math.Max(54f, diameter));
+            if (FloatTextEditorFocusPending.Remove(key))
+                ImGui.SetKeyboardFocusHere();
+
+            // RWImGUI currently ships Dear ImGui 1.91. Its InputScalar/InputFloat path
+            // asserts when EnterReturnsTrue is supplied, so never pass that flag here. Enter is
+            // handled explicitly below and force-commits the numeric transaction instead.
+            changed = ImGui.InputFloat(
+                "##RotaryInput",
+                ref value,
+                0f,
+                0f,
+                "%.3f");
+            value = Math.Max(min, Math.Min(max, value));
+
+            bool enterPressed =
+                ImGui.IsItemActive() &&
+                ImGui.IsKeyPressed(ImGuiKey.Enter);
+            bool leaveEditor =
+                ImGui.IsItemDeactivated() ||
+                enterPressed;
+            DevToolNumericEditResult<float> result =
+                EndFloat(
+                    key,
+                    authoritativeValue,
+                    value,
+                    changed,
+                    state,
+                    frame,
+                    forceCommit: enterPressed);
+
+            if (leaveEditor)
+            {
+                FloatTextEditors.Remove(key);
+                FloatTextEditorFocusPending.Remove(key);
+            }
+
+            ImGui.PopID();
+            ImGui.PopID();
+            ImGui.PopID();
+            return result;
+        }
+
+        ImGui.InvisibleButton(
+            "##Rotary",
+            new Num.Vector2(diameter, diameter));
+
+        bool hovered = ImGui.IsItemHovered();
+        bool itemActive = ImGui.IsItemActive();
+        bool resetRequested =
+            resetValue.HasValue &&
+            hovered &&
+            ImGui.IsMouseClicked(ImGuiMouseButton.Middle);
+        bool doubleClicked =
+            hovered &&
+            ImGui.IsMouseDoubleClicked(ImGuiMouseButton.Left);
+
+        bool ownsDrag =
+            activeRotaryDragKey.HasValue &&
+            activeRotaryDragKey.Value.Equals(key);
+
+        // Any fresh left click outside this rotary invalidates stale ownership immediately. The
+        // visual state below is derived from ownership, never from ImGui.IsItemActive() alone:
+        // window dragging/focus changes must not make a rotary look pressed.
+        if (ownsDrag &&
+            ImGui.IsMouseClicked(ImGuiMouseButton.Left) &&
+            !(hovered && itemActive))
+        {
+            activeRotaryDragKey = null;
+            ownsDrag = false;
+        }
+
+        // Also retire ownership that survived while this widget was temporarily not rendered.
+        if (ownsDrag &&
+            !ImGui.IsMouseDown(ImGuiMouseButton.Left) &&
+            !ImGui.IsMouseReleased(ImGuiMouseButton.Left))
+        {
+            activeRotaryDragKey = null;
+            ownsDrag = false;
+        }
+
+        if (resetRequested)
+        {
+            if (ownsDrag)
+            {
+                activeRotaryDragKey = null;
+                ownsDrag = false;
+            }
+
+            float next = Math.Max(
+                min,
+                Math.Min(
+                    max,
+                    resetValue.Value));
+            if (!NearlyEqual(next, value))
+            {
+                value = next;
+                changed = true;
+            }
+        }
+        else if (doubleClicked)
+        {
+            if (ownsDrag)
+            {
+                activeRotaryDragKey = null;
+                ownsDrag = false;
+            }
+
+            FloatTextEditors.Add(key);
+            FloatTextEditorFocusPending.Add(key);
+        }
+        else
+        {
+            if (hovered &&
+                itemActive &&
+                ImGui.IsMouseClicked(ImGuiMouseButton.Left))
+            {
+                activeRotaryDragKey = key;
+                ownsDrag = true;
+            }
+
+            // A rotary may consume mouse delta only while THIS InvisibleButton is the active ImGui
+            // item and the drag started on this exact rotary. Window moves, splitter drags, canvas
+            // pans, clicks in other windows, etc. must never adjust a rotary merely because a stale
+            // drag key exists.
+            if (ownsDrag &&
+                itemActive &&
+                ImGui.IsMouseDragging(ImGuiMouseButton.Left, 0f))
+            {
+                Num.Vector2 delta = ImGui.GetIO().MouseDelta;
+                float span = Math.Max(0.0001f, max - min);
+                float next = value + (delta.X - delta.Y) * span / 180f;
+                next = Math.Max(min, Math.Min(max, next));
+                if (!NearlyEqual(next, value))
+                {
+                    value = next;
+                    changed = true;
+                }
+            }
+        }
+
+        bool rotaryPressed =
+            ownsDrag &&
+            itemActive &&
+            ImGui.IsMouseDown(ImGuiMouseButton.Left);
+
+        Num.Vector2 rectMin = ImGui.GetItemRectMin();
+        Num.Vector2 rectMax = ImGui.GetItemRectMax();
+        Num.Vector2 center = new(
+            (rectMin.X + rectMax.X) * 0.5f,
+            (rectMin.Y + rectMax.Y) * 0.5f);
+        float radius = Math.Max(8f, diameter * 0.5f - 2f);
+
+        ImDrawListPtr draw = ImGui.GetWindowDrawList();
+        uint background = ImGui.GetColorU32(
+            rotaryPressed ? ImGuiCol.FrameBgActive :
+            hovered ? ImGuiCol.FrameBgHovered :
+            ImGuiCol.FrameBg);
+        uint border = ImGui.GetColorU32(ImGuiCol.Border);
+        uint indicator = ImGui.GetColorU32(
+            rotaryPressed ? ImGuiCol.SliderGrabActive : ImGuiCol.SliderGrab);
+        uint text = ImGui.GetColorU32(ImGuiCol.Text);
+
+        draw.AddCircleFilled(center, radius, background, 32);
+        draw.AddCircle(center, radius, border, 32, 1.5f);
+
+        float normalized =
+            max <= min
+                ? 0f
+                : Math.Max(0f, Math.Min(1f, (value - min) / (max - min)));
+        float angle = 2.3561945f + normalized * 4.712389f;
+        Num.Vector2 pointer = new(
+            center.X + (float)Math.Cos(angle) * radius * 0.72f,
+            center.Y + (float)Math.Sin(angle) * radius * 0.72f);
+        draw.AddLine(center, pointer, indicator, rotaryPressed ? 3.4f : 2.8f);
+        draw.AddCircleFilled(center, Math.Max(2.5f, radius * 0.10f), indicator, 16);
+
+        string valueText = value.ToString(displayFormat);
+        Num.Vector2 valueSize = ImGui.CalcTextSize(valueText);
+        draw.AddText(
+            new Num.Vector2(
+                center.X - valueSize.X * 0.5f,
+                rectMax.Y - valueSize.Y - 5f),
+            text,
+            valueText);
+
+        bool ownsReleasedDrag =
+            activeRotaryDragKey.HasValue &&
+            activeRotaryDragKey.Value.Equals(key) &&
+            ImGui.IsMouseReleased(ImGuiMouseButton.Left);
+
+        DevToolNumericEditResult<float> rotaryResult =
+            EndFloat(
+                key,
+                authoritativeValue,
+                value,
+                changed,
+                state,
+                frame,
+                forceCommit: ownsReleasedDrag || resetRequested);
+
+        if (ownsReleasedDrag)
+            activeRotaryDragKey = null;
+
+        if (hovered)
+        {
+            DevToolTooltip.Show(
+                DevToolUiSettings.T(
+                    resetValue.HasValue
+                        ? "拖动旋钮调节；双击输入数字；中键恢复默认"
+                        : "拖动旋钮调节；双击输入数字",
+                    resetValue.HasValue
+                        ? "Drag to adjust; double-click to type; middle-click to reset"
+                        : "Drag to adjust; double-click to type a value"));
+        }
+
+        ImGui.PopID();
+        ImGui.PopID();
+        ImGui.PopID();
+        return rotaryResult;
+    }
+
+    internal static DevToolNumericEditResult<int> SliderInt(
+        string scope,
+        string stateKey,
+        string label,
+        int authoritativeValue,
+        int min,
+        int max,
+        string format = "%d",
+        int instance = -1)
+    {
+        int frame = PrepareFrame();
+        EditKey key = new(scope, instance, stateKey);
+        IntState state = BeginInt(key, authoritativeValue, frame);
+        int value = state.LocalValue;
+        bool changed = ImGui.SliderInt(
+            label,
+            ref value,
+            min,
+            max,
+            format,
+            ImGuiSliderFlags.AlwaysClamp);
+        return EndInt(key, authoritativeValue, value, changed, state, frame);
+    }
+
+    internal static DevToolNumericEditResult<int> InputInt(
+        string scope,
+        string stateKey,
+        string label,
+        int authoritativeValue,
+        int step = 1,
+        int stepFast = 10,
+        int instance = -1,
+        int? min = null,
+        int? max = null)
+    {
+        int frame = PrepareFrame();
+        EditKey key = new(scope, instance, stateKey);
+        IntState state = BeginInt(key, authoritativeValue, frame);
+        int value = state.LocalValue;
+        bool changed = ImGui.InputInt(label, ref value, step, stepFast);
+        if (min.HasValue && value < min.Value) value = min.Value;
+        if (max.HasValue && value > max.Value) value = max.Value;
+        return EndInt(key, authoritativeValue, value, changed, state, frame);
+    }
+
+    internal static void Discard(string scope, string stateKey, int instance = -1)
+    {
+        EditKey key = new(scope, instance, stateKey);
+        FloatStates.Remove(key);
+        IntStates.Remove(key);
+        FloatTextEditors.Remove(key);
+        FloatTextEditorFocusPending.Remove(key);
+        if (activeRotaryDragKey.HasValue &&
+            activeRotaryDragKey.Value.Equals(key))
+        {
+            activeRotaryDragKey = null;
+        }
+    }
+
+    internal static void Reset()
+    {
+        FloatStates.Clear();
+        IntStates.Clear();
+        FloatTextEditors.Clear();
+        FloatTextEditorFocusPending.Clear();
+        activeRotaryDragKey = null;
+        StaleKeys.Clear();
+        nextPruneFrame = 0;
+    }
+
+    private static int PrepareFrame()
+    {
+        int frame = ImGui.GetFrameCount();
+        if (frame < nextPruneFrame) return frame;
+        nextPruneFrame = frame + PruneIntervalFrames;
+        PruneStaleStates(frame);
+        return frame;
+    }
+
+    private static void PruneStaleStates(int frame)
+    {
+        if (FloatStates.Count > 0)
+        {
+            StaleKeys.Clear();
+            foreach (KeyValuePair<EditKey, FloatState> pair in FloatStates)
+            {
+                if (frame - pair.Value.LastTouchedFrame >= StaleStateFrameLimit)
+                    StaleKeys.Add(pair.Key);
+            }
+            for (int i = 0; i < StaleKeys.Count; i++)
+                FloatStates.Remove(StaleKeys[i]);
+        }
+
+        if (IntStates.Count > 0)
+        {
+            StaleKeys.Clear();
+            foreach (KeyValuePair<EditKey, IntState> pair in IntStates)
+            {
+                if (frame - pair.Value.LastTouchedFrame >= StaleStateFrameLimit)
+                    StaleKeys.Add(pair.Key);
+            }
+            for (int i = 0; i < StaleKeys.Count; i++)
+                IntStates.Remove(StaleKeys[i]);
+        }
+
+        StaleKeys.Clear();
+    }
+
+    private static FloatState BeginFloat(EditKey key, float authoritativeValue, int frame)
+    {
+        if (!FloatStates.TryGetValue(key, out FloatState state))
+        {
+            state.LocalValue = authoritativeValue;
+            state.LastTouchedFrame = frame;
+            return state;
+        }
+
+        state.LastTouchedFrame = frame;
+        if (state.Dirty)
+            return state;
+
+        if (!state.Pending)
+        {
+            state.LocalValue = authoritativeValue;
+            return state;
+        }
+
+        int age = frame - state.SubmittedFrame;
+        if (NearlyEqual(authoritativeValue, state.PendingValue) || age >= PendingAckFrameLimit)
+        {
+            state.Pending = false;
+            state.LocalValue = authoritativeValue;
+        }
+        else
+        {
+            state.LocalValue = state.PendingValue;
+        }
+        return state;
+    }
+
+    private static DevToolNumericEditResult<float> EndFloat(
+        EditKey key,
+        float authoritativeValue,
+        float value,
+        bool changed,
+        FloatState state,
+        int frame,
+        bool forceCommit = false)
+    {
+        state.LastTouchedFrame = frame;
+        if (changed)
+        {
+            state.LocalValue = value;
+            state.Dirty = true;
+            state.Pending = false;
+        }
+
+        bool committed = false;
+        if ((!ImGui.IsItemActive() || forceCommit) && state.Dirty)
+        {
+            state.Dirty = false;
+            if (!NearlyEqual(value, authoritativeValue))
+            {
+                state.Pending = true;
+                state.PendingValue = value;
+                state.SubmittedFrame = frame;
+                state.LocalValue = value;
+                committed = true;
+            }
+            else
+            {
+                state.LocalValue = authoritativeValue;
+            }
+        }
+
+        if (state.Dirty || state.Pending)
+            FloatStates[key] = state;
+        else
+            FloatStates.Remove(key);
+
+        return new DevToolNumericEditResult<float>(state.LocalValue, committed);
+    }
+
+    private static IntState BeginInt(EditKey key, int authoritativeValue, int frame)
+    {
+        if (!IntStates.TryGetValue(key, out IntState state))
+        {
+            state.LocalValue = authoritativeValue;
+            state.LastTouchedFrame = frame;
+            return state;
+        }
+
+        state.LastTouchedFrame = frame;
+        if (state.Dirty)
+            return state;
+
+        if (!state.Pending)
+        {
+            state.LocalValue = authoritativeValue;
+            return state;
+        }
+
+        int age = frame - state.SubmittedFrame;
+        if (authoritativeValue == state.PendingValue || age >= PendingAckFrameLimit)
+        {
+            state.Pending = false;
+            state.LocalValue = authoritativeValue;
+        }
+        else
+        {
+            state.LocalValue = state.PendingValue;
+        }
+        return state;
+    }
+
+    private static DevToolNumericEditResult<int> EndInt(
+        EditKey key,
+        int authoritativeValue,
+        int value,
+        bool changed,
+        IntState state,
+        int frame)
+    {
+        state.LastTouchedFrame = frame;
+        if (changed)
+        {
+            state.LocalValue = value;
+            state.Dirty = true;
+            state.Pending = false;
+        }
+
+        bool committed = false;
+        if (!ImGui.IsItemActive() && state.Dirty)
+        {
+            state.Dirty = false;
+            if (value != authoritativeValue)
+            {
+                state.Pending = true;
+                state.PendingValue = value;
+                state.SubmittedFrame = frame;
+                state.LocalValue = value;
+                committed = true;
+            }
+            else
+            {
+                state.LocalValue = authoritativeValue;
+            }
+        }
+
+        if (state.Dirty || state.Pending)
+            IntStates[key] = state;
+        else
+            IntStates.Remove(key);
+
+        return new DevToolNumericEditResult<int>(state.LocalValue, committed);
+    }
+
+    private static bool NearlyEqual(float left, float right) => Math.Abs(left - right) <= 0.0001f;
+}

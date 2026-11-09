@@ -1,0 +1,13 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup><OutputType>Exe</OutputType><TargetFramework>net48</TargetFramework><LangVersion>13</LangVersion><ImplicitUsings>disable</ImplicitUsings>
+    <RainWorldDir Condition="'$(RainWorldDir)' == ''">D:/Steam/steamapps/common/Rain World</RainWorldDir>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NETFramework.ReferenceAssemblies.net48" Version="1.0.3" PrivateAssets="all" />
+    <Reference Include="System.Xml.Linq" />
+    <Reference Include="Assembly-CSharp"><HintPath>$(RainWorldDir)/BepInEx/utils/PUBLIC-Assembly-CSharp.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="Pom"><HintPath>$(RainWorldDir)/../../workshop/content/312520/2920439169/plugins/Pom.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="UnityEngine.CoreModule"><HintPath>$(RainWorldDir)/RainWorld_Data/Managed/UnityEngine.CoreModule.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="UnityEngine"><HintPath>$(RainWorldDir)/RainWorld_Data/Managed/UnityEngine.dll</HintPath><Private>false</Private></Reference>
+  </ItemGroup>
+</Project>

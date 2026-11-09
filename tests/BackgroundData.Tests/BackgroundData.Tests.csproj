@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup><TargetFramework>net10.0</TargetFramework><OutputType>Exe</OutputType><ImplicitUsings>enable</ImplicitUsings><EnableDefaultCompileItems>false</EnableDefaultCompileItems><NoWarn>$(NoWarn);SYSLIB0050</NoWarn></PropertyGroup>
+  <ItemGroup>
+    <Compile Include="Program.cs" />
+    <Compile Include="OriginalInputProbe.cs" />
+    <Compile Include="BackgroundLayoutProbe.cs" />
+    <Compile Include="WorldSelectionProbe.cs" />
+    <Compile Include="ConnectionSyntaxProbe.cs" />
+    <Compile Include="OwnerReadProjectionProbe.cs" />
+    <Compile Include="../../src/Rainwright/Backend/Background/BackgroundDocument.cs" Link="Production/BackgroundDocument.cs" />
+    <Compile Include="../../src/Rainwright/Game/DevTool/Background/BackgroundDataAccess.cs" Link="Production/BackgroundDataAccess.cs" />
+    <Compile Include="../../src/Rainwright/Game/DevTool/Background/BackgroundRecordCodec.cs" Link="Production/BackgroundRecordCodec.cs" />
+    <ProjectReference Include="FakeRegionKit/FakeRegionKit.csproj" />
+    <PackageReference Include="Mono.Cecil" Version="0.11.6" />
+  </ItemGroup>
+</Project>

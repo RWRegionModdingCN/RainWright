@@ -1,0 +1,42 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <LangVersion>13</LangVersion>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <DefineConstants>$(DefineConstants);RAINWRIGHT_RUNTIME</DefineConstants>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="../../src/Rainwright/Game/DevTool/Core/EditorSlowOperation.cs" Link="Production/EditorSlowOperation.cs" />
+    <Compile Include="../../src/Rainwright/Game/DevTool/AutoSave/EditorSaveLifecycle.cs" Link="Production/EditorSaveLifecycle.cs" />
+    <Compile Include="../../src/Rainwright/Runtime/EditorBackendServiceLedger.cs" Link="Production/EditorBackendServiceLedger.cs" />
+    <Compile Include="../../src/Rainwright/Backend/World/ModificationFileComposer.cs" Link="Production/ModificationFileComposer.cs" />
+    <Compile Include="../../src/Rainwright/Game/DevTool/World/WorldModificationWorkspace.cs" Link="Production/WorldModificationWorkspace.cs" />
+    <Compile Include="../../src/Rainwright/Backend/Settings/RainWrightPersonalSettings.cs" Link="Production/RainWrightPersonalSettings.cs" />
+    <Compile Include="../../src/Rainwright/Backend/AutoSave/EditorAutoSaveSchedule.cs" Link="Production/EditorAutoSaveSchedule.cs" />
+    <Compile Include="../../src/Rainwright/Backend/History/EditorHistoryJournal.cs" Link="Production/EditorHistoryJournal.cs" />
+    <Compile Include="../../src/Rainwright/Game/DevTool/AutoSave/AutoSaveCoordinator.cs"
+             Link="Production/AutoSaveCoordinator.cs" />
+    <Compile Include="../../src/Rainwright/Backend/Authoring/EditorAuthoringParticipants.cs" Link="Production/EditorAuthoringParticipants.cs" />
+    <Compile Include="../../src/Rainwright/Game/DevTool/AutoSave/EditorAutoSavePreferences.cs" Link="Production/EditorAutoSavePreferences.cs" />
+    <Compile Include="../../src/Rainwright/Backend/AutoSave/RainwrightAutoSaveSettingsStore.cs" Link="Production/RainwrightAutoSaveSettingsStore.cs" />
+    <Compile Include="../../src/Rainwright/Game/DevTool/Input/EditorShortcutGameplayPolicy.cs" Link="Production/EditorShortcutGameplayPolicy.cs" />
+    <Compile Include="../../src/Rainwright/Backend/Input/RainwrightShortcutInputSettingsStore.cs" Link="Production/RainwrightShortcutInputSettingsStore.cs" />
+    <Compile Include="../../src/Rainwright/Game/DevTool/Core/EditorDiagnostics.cs"
+             Link="Production/EditorDiagnostics.cs" />
+    <Compile Include="../../src/Rainwright/Game/DevTool/Core/EditorStartupDiagnostics.cs"
+             Link="Production/EditorStartupDiagnostics.cs" />
+    <Compile Include="../../src/Rainwright/Game/DevTool/AutoSave/RecoverySnapshotStore.cs"
+             Link="Production/RecoverySnapshotStore.cs" />
+    <Compile Include="../../src/Rainwright/Backend/AutoSave/EditorRecoveryFileTransaction.cs"
+             Link="Production/EditorRecoveryFileTransaction.cs" />
+    <Compile Include="../../src/Rainwright/Game/DevTool/World/WorldTopologyPathOwnership.cs"
+             Link="Production/WorldTopologyPathOwnership.cs" />
+    <Compile Include="../../src/Rainwright/Game/DevTool/World/WorldAuthoringPathResolver.cs"
+             Link="Production/WorldAuthoringPathResolver.cs" />
+    <Compile Include="../../src/Shared/AuthoringSourcePaths.cs"
+             Link="Production/AuthoringSourcePaths.cs" />
+  </ItemGroup>
+  <ItemGroup><Compile Include="../../src/Rainwright/Backend/Core/EditorBackupFiles.cs" Link="Production/EditorBackupFiles.cs" /></ItemGroup>
+</Project>

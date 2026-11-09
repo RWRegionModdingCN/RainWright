@@ -1,0 +1,633 @@
+using System;
+using DryCycle.DevUI.DevTool.Core;
+using System.Collections.Generic;
+using DryCycle.DevUI.DevTool.Compatibility;
+using DryCycle.DevUI.DevTool.Map;
+using DryCycle.DevUI.DevTool.Objects;
+using ImGuiNET;
+using Num = System.Numerics;
+
+namespace DryCycle.DevUI.DevTool.RWImGui;
+
+/// <summary>
+/// MapPage presentation. This view owns only map layout/Dev Position authoring.
+/// Endpoint topology editing lives in WorldGraphView so graph layout never mutates map layout.
+/// </summary>
+internal static class MapEditorView
+{
+    private sealed class MapBrowserRow
+    {
+        internal EditorMapRoomSnapshot Room;
+        internal string Label = string.Empty;
+    }
+
+    private readonly struct VisibleRoom
+    {
+        internal VisibleRoom(EditorMapRoomSnapshot room, Num.Vector2 min, Num.Vector2 max)
+        {
+            Room = room;
+            Min = min;
+            Max = max;
+        }
+
+        internal EditorMapRoomSnapshot Room { get; }
+        internal Num.Vector2 Min { get; }
+        internal Num.Vector2 Max { get; }
+    }
+
+    private static readonly Dictionary<int, Num.Vector2> LocalPositions = new();
+    private static readonly Dictionary<int, EditorMapRoomSnapshot> RoomsByIndex = new();
+    private static readonly List<MapBrowserRow> BrowserRows = new();
+    private static readonly List<VisibleRoom> VisibleRoomsScratch = new();
+    private static EditorMapRoomSnapshot[] indexedRooms;
+    private static EditorMapRoomSnapshot[] synchronizedPositionRooms;
+    private static EditorMapRoomSnapshot[] projectedBrowserRooms;
+    private static string projectedBrowserSearch;
+    private static int projectedBrowserLayerMask = -1;
+    private static bool projectedBrowserChinese;
+    private static string search = string.Empty;
+    private static readonly bool[] LayerVisible = { true, true, true };
+    private static Num.Vector2 pan;
+    private static float zoom = 1f;
+    private static bool fitRequested = true;
+    private static int draggingRoom = -1;
+    private static Num.Vector2 dragStartMouse;
+    private static Num.Vector2 dragStartWorld;
+    private static int inspectorRoom = -1;
+    private static Num.Vector2 inspectorPosition;
+    private static string inspectorSubregion = string.Empty;
+
+    internal static void ResetRetainedState()
+    {
+        LocalPositions.Clear();
+        RoomsByIndex.Clear();
+        BrowserRows.Clear();
+        VisibleRoomsScratch.Clear();
+        indexedRooms = null;
+        synchronizedPositionRooms = null;
+        projectedBrowserRooms = null;
+        projectedBrowserSearch = null;
+        projectedBrowserLayerMask = -1;
+        projectedBrowserChinese = false;
+        search = string.Empty;
+        LayerVisible[0] = true;
+        LayerVisible[1] = true;
+        LayerVisible[2] = true;
+        pan = default;
+        zoom = 1f;
+        fitRequested = true;
+        draggingRoom = -1;
+        dragStartMouse = default;
+        dragStartWorld = default;
+        inspectorRoom = -1;
+        inspectorPosition = default;
+        inspectorSubregion = string.Empty;
+    }
+
+    internal static void DrawBrowser(EditorMapPresentationSnapshot snapshot)
+    {
+        if (!snapshot.Available)
+        {
+            DevToolWidgets.MutedText(DevToolUiSettings.T("地图编辑器不可用。", "Map editor unavailable."), true);
+            return;
+        }
+
+        ImGui.TextDisabled(snapshot.RegionName + " | " + (snapshot.Rooms?.Length ?? 0) + DevToolUiSettings.T(" 个房间", " rooms"));
+        if (DevToolWidgets.ActionButton(
+                DevToolUiSettings.T("适配地图", "Fit Map"),
+                "MapFit",
+                DevToolButtonTone.Normal))
+            fitRequested = true;
+
+        if (DevToolWidgets.SameLineIfFits(DevToolWidgets.ButtonWidth("100%")))
+        {
+            if (DevToolWidgets.ActionButton("100%", "MapZoom100", DevToolButtonTone.Subtle)) zoom = 1f;
+        }
+        else if (DevToolWidgets.ActionButton("100%", "MapZoom100", DevToolButtonTone.Subtle))
+        {
+            zoom = 1f;
+        }
+
+        ImGui.Separator();
+        ImGui.TextDisabled(DevToolUiSettings.T("图层", "LAYERS"));
+        for (int i = 0; i < LayerVisible.Length; i++)
+        {
+            bool visible = LayerVisible[i];
+            string label = MapRoomLayer.Label(i);
+            if (ImGui.Checkbox(label + "##MapLayerFilter" + i, ref visible))
+            {
+                LayerVisible[i] = visible;
+                fitRequested = true;
+            }
+            if (i < LayerVisible.Length - 1)
+                DevToolWidgets.SameLineIfFits(
+                    ImGui.GetFrameHeight() + ImGui.GetStyle().ItemInnerSpacing.X +
+                    ImGui.CalcTextSize(MapRoomLayer.Label(i + 1)).X);
+        }
+
+        ImGui.Spacing();
+        DevToolWidgets.FullWidthInputText(
+            DevToolUiSettings.T("搜索房间", "Search rooms"),
+            "MapRoomSearch",
+            ref search,
+            128);
+        ImGui.Separator();
+
+        EnsureBrowserProjection(snapshot);
+        using (DevToolListClipper clipper = new(BrowserRows.Count))
+        {
+            while (clipper.Step(out int firstVisible, out int lastVisibleExclusive))
+            {
+                for (int i = firstVisible; i < lastVisibleExclusive; i++)
+                {
+                    MapBrowserRow row = BrowserRows[i];
+                    EditorMapRoomSnapshot room = row.Room;
+                    if (ImGui.Selectable(row.Label, room.Selected))
+                        Select(room.RoomIndex);
+                }
+            }
+        }
+
+        if (BrowserRows.Count == 0)
+            DevToolWidgets.MutedText(DevToolUiSettings.T("没有匹配的房间。", "No matching rooms."), true);
+    }
+
+    internal static void DrawInspector(EditorMapPresentationSnapshot snapshot)
+    {
+        EditorMapRoomSnapshot room = FindRoom(snapshot, snapshot.SelectedRoomIndex);
+        if (room == null)
+        {
+            inspectorRoom = -1;
+            ImGui.TextWrapped(DevToolUiSettings.T(
+                "从图中或房间列表选择一个房间。",
+                "Select a room from the map or room list."));
+            DrawGenericPageControls();
+            return;
+        }
+
+        SynchronizeInspector(room);
+        ImGui.TextUnformatted(room.Name);
+        ImGui.TextDisabled(DevToolUiSettings.T("房间索引 ", "Room index ") + room.RoomIndex);
+        if (room.CurrentRoom) ImGui.TextDisabled(DevToolUiSettings.T("当前镜头房间", "Current camera room"));
+        if (room.OffScreenDen) ImGui.TextDisabled(DevToolUiSettings.T("屏幕外巢穴", "Off-screen den"));
+        if (room.Disabled) ImGui.TextDisabled(DevToolUiSettings.T("从地图输出中隐藏", "Hidden from map output"));
+        ImGui.Separator();
+
+        Num.Vector2 position = inspectorPosition;
+        bool positionChanged = ImGui.InputFloat2(
+            DevToolUiSettings.T("开发位置##MapInspectorPosition", "Dev position##MapInspectorPosition"),
+            ref position,
+            "%.1f");
+        inspectorPosition = position;
+        if (ImGui.IsItemDeactivatedAfterEdit())
+            SetPosition(room.RoomIndex, position);
+        else if (!positionChanged && !ImGui.IsItemActive())
+            inspectorPosition = new Num.Vector2(room.X, room.Y);
+
+        int layer = room.Layer;
+        if (ImGui.BeginCombo(
+                DevToolUiSettings.T("图层##MapInspectorLayer", "Layer##MapInspectorLayer"),
+                MapRoomLayer.Label(layer)))
+        {
+            for (int i = 0; i < MapRoomLayer.Count; i++)
+            {
+                bool selected = layer == i;
+                if (ImGui.Selectable(MapRoomLayer.Label(i) + "##MapLayer" + i, selected))
+                    MapEditorCommandQueue.Enqueue(new MapEditorCommand(
+                        MapEditorCommandKind.SetRoomLayer,
+                        roomIndex: room.RoomIndex,
+                        value: new EditorPropertyValue(EditorPropertyKind.Integer, integer: i)));
+                if (selected) ImGui.SetItemDefaultFocus();
+            }
+            ImGui.EndCombo();
+        }
+
+        DevToolWidgets.MutedText(DevToolUiSettings.T("子区域", "Subregion"));
+        ImGui.SetNextItemWidth(-1f);
+        string subregion = inspectorSubregion;
+        bool subregionChanged = ImGui.InputText("##MapInspectorSubregion", ref subregion, 128);
+        inspectorSubregion = subregion;
+        if (ImGui.IsItemDeactivatedAfterEdit())
+            MapEditorCommandQueue.Enqueue(new MapEditorCommand(
+                MapEditorCommandKind.SetRoomSubregion,
+                roomIndex: room.RoomIndex,
+                text: subregion));
+        else if (!subregionChanged && !ImGui.IsAnyItemActive())
+            inspectorSubregion = room.Subregion ?? string.Empty;
+
+        ImGui.Separator();
+        DevToolWidgets.MutedText(DevToolUiSettings.T(
+            "拖动中央地图中的房间修改 Dev Position；滚轮缩放，中键/右键平移。世界连接请在 World Graph 中编辑。",
+            "Drag rooms in the map to edit Dev Position; wheel zooms and middle/right drag pans. Edit world links in World Graph."), true);
+        DrawGenericPageControls();
+    }
+
+    private static void SynchronizeInspector(EditorMapRoomSnapshot room)
+    {
+        if (inspectorRoom != room.RoomIndex)
+        {
+            inspectorRoom = room.RoomIndex;
+            inspectorPosition = new Num.Vector2(room.X, room.Y);
+            inspectorSubregion = room.Subregion ?? string.Empty;
+            return;
+        }
+
+        if (!ImGui.IsAnyItemActive())
+        {
+            inspectorPosition = new Num.Vector2(room.X, room.Y);
+            inspectorSubregion = room.Subregion ?? string.Empty;
+        }
+    }
+
+    private static void DrawGenericPageControls()
+    {
+        UniversalDevUiPresentationSnapshot generic = UniversalDevUiPresentationHub.Current;
+        if (generic?.Available != true) return;
+
+        ImGui.Spacing();
+        if (!ImGui.CollapsingHeader(
+                DevToolUiSettings.T("页面扩展控件##MapGenericPageControls", "PAGE EXTENSION CONTROLS##MapGenericPageControls")))
+            return;
+
+        UniversalDevUiMirrorView.Draw(generic);
+    }
+
+    internal static void DrawCanvas(EditorMapPresentationSnapshot snapshot, Num.Vector2 position, Num.Vector2 size)
+    {
+        if (!snapshot.Available || size.X < 120f || size.Y < 120f) return;
+
+        ImGui.SetNextWindowPos(position, ImGuiCond.FirstUseEver);
+        ImGui.SetNextWindowSize(size, ImGuiCond.FirstUseEver);
+        ImGui.SetNextWindowSizeConstraints(new Num.Vector2(420f, 300f), new Num.Vector2(4000f, 4000f));
+        ImGui.SetNextWindowBgAlpha(DevToolUiSettings.WindowAlpha);
+        ImGuiWindowFlags flags = ImGuiWindowFlags.NoCollapse |
+                                 ImGuiWindowFlags.NoScrollbar |
+                                 ImGuiWindowFlags.NoScrollWithMouse;
+        if (!ImGui.Begin(
+                DevToolUiSettings.T("区域地图###DevToolMapCanvas", "Region Map###DevToolMapCanvas"),
+                flags))
+        {
+            ImGui.End();
+            return;
+        }
+
+        FloatingWindowSnap.TrackCurrentWindow("MapCanvas");
+        DrawCanvasSurface(snapshot, "##MapCanvasInput");
+        ImGui.End();
+    }
+
+    internal static void DrawEmbeddedCanvas(EditorMapPresentationSnapshot snapshot)
+    {
+        if (!snapshot.Available)
+        {
+            DevToolWidgets.MutedText(DevToolUiSettings.T("地图编辑器不可用。", "Map editor unavailable."), true);
+            return;
+        }
+
+        ImGui.TextDisabled(snapshot.RegionName + " | " + (snapshot.Rooms?.Length ?? 0) + DevToolUiSettings.T(" 个房间", " rooms"));
+        ImGui.SameLine();
+        ImGui.TextDisabled("| " + Math.Round(zoom * 100f) + "%");
+        ImGui.SameLine();
+        if (DevToolWidgets.ActionButton(
+                DevToolUiSettings.T("适配", "Fit"),
+                "MapCanvasFit",
+                DevToolButtonTone.Subtle))
+            fitRequested = true;
+        ImGui.SameLine();
+        if (DevToolWidgets.ActionButton("100%", "MapCanvasZoom100", DevToolButtonTone.Subtle))
+            zoom = 1f;
+
+        ImGui.Spacing();
+        DrawCanvasSurface(snapshot, "##MapEmbeddedCanvasInput");
+    }
+
+    private static void DrawCanvasSurface(EditorMapPresentationSnapshot snapshot, string inputId)
+    {
+        Num.Vector2 canvasMin = ImGui.GetCursorScreenPos();
+        Num.Vector2 canvasSize = ImGui.GetContentRegionAvail();
+        if (canvasSize.X < 50f || canvasSize.Y < 50f) return;
+
+        ImGui.InvisibleButton(inputId, canvasSize);
+        bool hovered = ImGui.IsItemHovered();
+        ImGuiIOPtr io = ImGui.GetIO();
+
+        EnsureRoomIndex(snapshot);
+        SynchronizeLocalPositions(snapshot);
+        if (fitRequested)
+        {
+            Fit(snapshot, canvasSize);
+            fitRequested = false;
+        }
+
+        if (hovered && Math.Abs(io.MouseWheel) > 0.0001f)
+        {
+            float oldZoom = zoom;
+            float nextZoom = Math.Max(0.2f, Math.Min(3.0f, zoom * ((RainWrightPersonalSettings.ReverseZoom ? -io.MouseWheel : io.MouseWheel) > 0f ? 1.12f : 0.89f)));
+            Num.Vector2 mouseInCanvas = io.MousePos - canvasMin;
+            Num.Vector2 worldAtMouse = (mouseInCanvas - pan) / oldZoom;
+            zoom = nextZoom;
+            pan = mouseInCanvas - worldAtMouse * zoom;
+        }
+
+        if (hovered &&
+            (ImGui.IsMouseDragging(ImGuiMouseButton.Middle) || ImGui.IsMouseDragging(ImGuiMouseButton.Right)))
+            pan += io.MouseDelta * RainWrightPersonalSettings.DragSensitivity;
+
+        ImDrawListPtr draw = ImGui.GetWindowDrawList();
+        Num.Vector2 canvasMax = canvasMin + canvasSize;
+        draw.AddRectFilled(canvasMin, canvasMax, ImGui.GetColorU32(ImGuiCol.ChildBg));
+        draw.AddRect(canvasMin, canvasMax, ImGui.GetColorU32(ImGuiCol.Border));
+        DrawGrid(draw, canvasMin, canvasSize);
+        DrawConnections(draw, snapshot, canvasMin, canvasMax);
+        DrawRooms(draw, snapshot, canvasMin, canvasMax, hovered, io);
+    }
+
+    private static void DrawGrid(ImDrawListPtr draw, Num.Vector2 canvasMin, Num.Vector2 canvasSize)
+    {
+        float grid = 64f * zoom;
+        if (grid < 16f) grid *= 4f;
+        uint color = ImGui.GetColorU32(ImGuiCol.Border);
+        float startX = PositiveModulo(pan.X, grid);
+        float startY = PositiveModulo(pan.Y, grid);
+
+        for (float x = startX; x < canvasSize.X; x += grid)
+            draw.AddLine(canvasMin + new Num.Vector2(x, 0f), canvasMin + new Num.Vector2(x, canvasSize.Y), color);
+        for (float y = startY; y < canvasSize.Y; y += grid)
+            draw.AddLine(canvasMin + new Num.Vector2(0f, y), canvasMin + new Num.Vector2(canvasSize.X, y), color);
+    }
+
+    private static void DrawConnections(
+        ImDrawListPtr draw,
+        EditorMapPresentationSnapshot snapshot,
+        Num.Vector2 canvasMin,
+        Num.Vector2 canvasMax)
+    {
+        EnsureRoomIndex(snapshot);
+        EditorMapConnectionSnapshot[] connections = snapshot.Connections ?? Array.Empty<EditorMapConnectionSnapshot>();
+        Num.Vector2 nodeCenter = NodeSize() * 0.5f;
+        uint color = ImGui.GetColorU32(ImGuiCol.TextDisabled);
+        for (int i = 0; i < connections.Length; i++)
+        {
+            EditorMapConnectionSnapshot connection = connections[i];
+            if (!RoomsByIndex.TryGetValue(connection.FromRoomIndex, out EditorMapRoomSnapshot a) ||
+                !RoomsByIndex.TryGetValue(connection.ToRoomIndex, out EditorMapRoomSnapshot b) ||
+                !IsLayerVisible(a.Layer) || !IsLayerVisible(b.Layer))
+                continue;
+
+            Num.Vector2 pa = ToScreen(canvasMin, GetLocalPosition(a)) + nodeCenter;
+            Num.Vector2 pb = ToScreen(canvasMin, GetLocalPosition(b)) + nodeCenter;
+            if (!SegmentBoundsIntersectsViewport(pa, pb, canvasMin, canvasMax, 8f)) continue;
+            draw.AddLine(pa, pb, color, 1.6f);
+        }
+    }
+
+    private static void DrawRooms(
+        ImDrawListPtr draw,
+        EditorMapPresentationSnapshot snapshot,
+        Num.Vector2 canvasMin,
+        Num.Vector2 canvasMax,
+        bool canvasHovered,
+        ImGuiIOPtr io)
+    {
+        EditorMapRoomSnapshot[] rooms = snapshot.Rooms ?? Array.Empty<EditorMapRoomSnapshot>();
+        EditorMapRoomSnapshot hoveredRoom = null;
+        Num.Vector2 nodeSize = NodeSize();
+        VisibleRoomsScratch.Clear();
+
+        for (int i = 0; i < rooms.Length; i++)
+        {
+            EditorMapRoomSnapshot room = rooms[i];
+            if (!IsLayerVisible(room.Layer)) continue;
+            Num.Vector2 min = ToScreen(canvasMin, GetLocalPosition(room));
+            Num.Vector2 max = min + nodeSize;
+            if (!RectsIntersect(min, max, canvasMin, canvasMax)) continue;
+
+            VisibleRoomsScratch.Add(new VisibleRoom(room, min, max));
+            if (canvasHovered && Contains(min, max, io.MousePos)) hoveredRoom = room;
+        }
+
+        if (canvasHovered && ImGui.IsMouseClicked(ImGuiMouseButton.Left))
+        {
+            if (hoveredRoom != null)
+            {
+                Select(hoveredRoom.RoomIndex);
+                draggingRoom = hoveredRoom.RoomIndex;
+                dragStartMouse = io.MousePos;
+                dragStartWorld = GetLocalPosition(hoveredRoom);
+            }
+            else
+            {
+                Select(-1);
+                draggingRoom = -1;
+            }
+        }
+
+        if (draggingRoom >= 0)
+        {
+            EditorMapRoomSnapshot dragged = FindRoom(snapshot, draggingRoom);
+            if (dragged != null && ImGui.IsMouseDown(ImGuiMouseButton.Left))
+                LocalPositions[draggingRoom] = dragStartWorld + (io.MousePos - dragStartMouse) / zoom;
+            else
+            {
+                if (dragged != null && LocalPositions.TryGetValue(draggingRoom, out Num.Vector2 final))
+                    SetPosition(draggingRoom, final);
+                draggingRoom = -1;
+            }
+        }
+
+        for (int i = 0; i < VisibleRoomsScratch.Count; i++)
+        {
+            VisibleRoom visible = VisibleRoomsScratch[i];
+            EditorMapRoomSnapshot room = visible.Room;
+            Num.Vector2 min = visible.Min;
+            Num.Vector2 max = visible.Max;
+            bool hovered = ReferenceEquals(room, hoveredRoom);
+
+            uint fill = ImGui.GetColorU32(
+                room.Selected ? ImGuiCol.ButtonActive :
+                room.CurrentRoom ? ImGuiCol.Header :
+                hovered ? ImGuiCol.ButtonHovered : ImGuiCol.FrameBg);
+            uint border = ImGui.GetColorU32(room.Disabled ? ImGuiCol.TextDisabled : ImGuiCol.Border);
+            uint text = ImGui.GetColorU32(room.Disabled ? ImGuiCol.TextDisabled : ImGuiCol.Text);
+
+            draw.AddRectFilled(min, max, fill, 4f);
+            draw.AddRect(min, max, border, 4f, ImDrawFlags.None, room.Selected ? 2f : 1f);
+            draw.AddText(min + new Num.Vector2(7f, 5f), text, room.Name);
+            string meta = MapRoomLayer.Label(room.Layer);
+            if (!string.IsNullOrEmpty(room.Subregion)) meta += " | " + room.Subregion;
+            if (room.OffScreenDen) meta += " | DEN";
+            draw.AddText(min + new Num.Vector2(7f, 20f), ImGui.GetColorU32(ImGuiCol.TextDisabled), meta);
+        }
+    }
+
+    private static void EnsureBrowserProjection(EditorMapPresentationSnapshot snapshot)
+    {
+        EditorMapRoomSnapshot[] rooms = snapshot.Rooms ?? Array.Empty<EditorMapRoomSnapshot>();
+        string normalizedSearch = search?.Trim() ?? string.Empty;
+        int layerMask = CurrentLayerMask();
+        bool chinese = DevToolUiSettings.IsChinese;
+        if (ReferenceEquals(projectedBrowserRooms, rooms) &&
+            string.Equals(projectedBrowserSearch, normalizedSearch, StringComparison.Ordinal) &&
+            projectedBrowserLayerMask == layerMask &&
+            projectedBrowserChinese == chinese)
+            return;
+
+        BrowserRows.Clear();
+        for (int i = 0; i < rooms.Length; i++)
+        {
+            EditorMapRoomSnapshot room = rooms[i];
+            if (!IsLayerVisible(room.Layer) || !Matches(room, normalizedSearch)) continue;
+
+            string label = room.Name + "  [L" + room.Layer + "]";
+            if (!string.IsNullOrEmpty(room.Subregion)) label += "  " + room.Subregion;
+            if (room.Disabled) label += DevToolUiSettings.T("  [隐藏]", "  [Hidden]");
+            label += "##MapBrowserRoom" + room.RoomIndex;
+            BrowserRows.Add(new MapBrowserRow { Room = room, Label = label });
+        }
+
+        projectedBrowserRooms = rooms;
+        projectedBrowserSearch = normalizedSearch;
+        projectedBrowserLayerMask = layerMask;
+        projectedBrowserChinese = chinese;
+    }
+
+    private static void EnsureRoomIndex(EditorMapPresentationSnapshot snapshot)
+    {
+        EditorMapRoomSnapshot[] rooms = snapshot?.Rooms ?? Array.Empty<EditorMapRoomSnapshot>();
+        if (ReferenceEquals(indexedRooms, rooms)) return;
+
+        RoomsByIndex.Clear();
+        for (int i = 0; i < rooms.Length; i++)
+        {
+            EditorMapRoomSnapshot room = rooms[i];
+            if (room != null) RoomsByIndex[room.RoomIndex] = room;
+        }
+        indexedRooms = rooms;
+    }
+
+    private static void SynchronizeLocalPositions(EditorMapPresentationSnapshot snapshot)
+    {
+        EditorMapRoomSnapshot[] rooms = snapshot.Rooms ?? Array.Empty<EditorMapRoomSnapshot>();
+        if (ReferenceEquals(synchronizedPositionRooms, rooms)) return;
+
+        Num.Vector2 draggedPosition = default;
+        bool preserveDragged = draggingRoom >= 0 && LocalPositions.TryGetValue(draggingRoom, out draggedPosition);
+        LocalPositions.Clear();
+        for (int i = 0; i < rooms.Length; i++)
+        {
+            EditorMapRoomSnapshot room = rooms[i];
+            if (room == null) continue;
+            LocalPositions[room.RoomIndex] = new Num.Vector2(room.X, room.Y);
+        }
+        if (preserveDragged) LocalPositions[draggingRoom] = draggedPosition;
+        synchronizedPositionRooms = rooms;
+    }
+
+    private static void Fit(EditorMapPresentationSnapshot snapshot, Num.Vector2 canvasSize)
+    {
+        EditorMapRoomSnapshot[] rooms = snapshot.Rooms ?? Array.Empty<EditorMapRoomSnapshot>();
+        bool found = false;
+        Num.Vector2 min = new(float.MaxValue, float.MaxValue);
+        Num.Vector2 max = new(float.MinValue, float.MinValue);
+        for (int i = 0; i < rooms.Length; i++)
+        {
+            EditorMapRoomSnapshot room = rooms[i];
+            if (!IsLayerVisible(room.Layer)) continue;
+            Num.Vector2 p = GetLocalPosition(room);
+            min = Num.Vector2.Min(min, p);
+            max = Num.Vector2.Max(max, p + new Num.Vector2(130f, 42f));
+            found = true;
+        }
+
+        if (!found)
+        {
+            zoom = 1f;
+            pan = canvasSize * 0.5f;
+            return;
+        }
+
+        Num.Vector2 span = Num.Vector2.Max(max - min, new Num.Vector2(1f, 1f));
+        float availableX = Math.Max(100f, canvasSize.X - 80f);
+        float availableY = Math.Max(100f, canvasSize.Y - 80f);
+        zoom = Math.Max(0.2f, Math.Min(2f, Math.Min(availableX / span.X, availableY / span.Y)));
+        Num.Vector2 center = (min + max) * 0.5f;
+        pan = canvasSize * 0.5f - center * zoom;
+    }
+
+    private static Num.Vector2 GetLocalPosition(EditorMapRoomSnapshot room)
+    {
+        if (room != null && LocalPositions.TryGetValue(room.RoomIndex, out Num.Vector2 value)) return value;
+        return room == null ? Num.Vector2.Zero : new Num.Vector2(room.X, room.Y);
+    }
+
+    private static Num.Vector2 ToScreen(Num.Vector2 canvasMin, Num.Vector2 world) =>
+        canvasMin + pan + world * zoom;
+
+    private static Num.Vector2 NodeSize() =>
+        new(130f * Math.Max(0.65f, Math.Min(1.3f, zoom)), 42f);
+
+    private static void Select(int roomIndex) =>
+        MapEditorCommandQueue.Enqueue(new MapEditorCommand(MapEditorCommandKind.SelectRoom, roomIndex));
+
+    private static void SetPosition(int roomIndex, Num.Vector2 position) =>
+        MapEditorCommandQueue.Enqueue(new MapEditorCommand(
+            MapEditorCommandKind.SetRoomPosition,
+            roomIndex: roomIndex,
+            value: new EditorPropertyValue(EditorPropertyKind.Vector2, x: position.X, y: position.Y)));
+
+    private static EditorMapRoomSnapshot FindRoom(EditorMapPresentationSnapshot snapshot, int roomIndex)
+    {
+        EnsureRoomIndex(snapshot);
+        return RoomsByIndex.TryGetValue(roomIndex, out EditorMapRoomSnapshot room) ? room : null;
+    }
+
+    private static int CurrentLayerMask()
+    {
+        int mask = 0;
+        for (int i = 0; i < LayerVisible.Length; i++)
+            if (LayerVisible[i]) mask |= 1 << i;
+        return mask;
+    }
+
+    private static bool IsLayerVisible(int layer) =>
+        layer >= 0 && layer < LayerVisible.Length ? LayerVisible[layer] : true;
+
+    private static bool Matches(EditorMapRoomSnapshot room, string query)
+    {
+        if (string.IsNullOrEmpty(query)) return true;
+        return Contains(room.Name, query) || Contains(room.Subregion, query) ||
+               (query.StartsWith("L", StringComparison.OrdinalIgnoreCase) &&
+                int.TryParse(query.Substring(1), out int layer) && room.Layer == layer);
+    }
+
+    private static bool Contains(string value, string query) =>
+        !string.IsNullOrEmpty(value) && value.IndexOf(query, StringComparison.OrdinalIgnoreCase) >= 0;
+
+    private static bool Contains(Num.Vector2 min, Num.Vector2 max, Num.Vector2 point) =>
+        point.X >= min.X && point.X <= max.X && point.Y >= min.Y && point.Y <= max.Y;
+
+    private static bool RectsIntersect(Num.Vector2 minA, Num.Vector2 maxA, Num.Vector2 minB, Num.Vector2 maxB) =>
+        maxA.X >= minB.X && minA.X <= maxB.X && maxA.Y >= minB.Y && minA.Y <= maxB.Y;
+
+    private static bool SegmentBoundsIntersectsViewport(
+        Num.Vector2 a,
+        Num.Vector2 b,
+        Num.Vector2 viewportMin,
+        Num.Vector2 viewportMax,
+        float margin)
+    {
+        float minX = Math.Min(a.X, b.X);
+        float maxX = Math.Max(a.X, b.X);
+        float minY = Math.Min(a.Y, b.Y);
+        float maxY = Math.Max(a.Y, b.Y);
+        return maxX >= viewportMin.X - margin && minX <= viewportMax.X + margin &&
+               maxY >= viewportMin.Y - margin && minY <= viewportMax.Y + margin;
+    }
+
+    private static float PositiveModulo(float value, float modulus)
+    {
+        if (modulus <= 0f) return 0f;
+        float result = value % modulus;
+        return result < 0f ? result + modulus : result;
+    }
+}

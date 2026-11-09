@@ -1,0 +1,15 @@
+0
+rainwright-name|雨匠
+rainwright-description|雨匠是一款面向《雨世界》地编开发者的独立 UI 工具，旨在提供更加现代化、直观且高效的开发体验。<LINE><LINE>雨匠全面重构了原版开发者工具的页面布局与交互方式，并将 World Editor 与 Cornifer 的功能整合进统一的可视化工作环境内。<LINE><LINE>雨匠基于操作习惯和开发者需求，添加了房间双向连接、连接修改与生物添加的热加载、自定义音效分组与管理功能、更符合人类宝宝使用的快捷键系统、自动存档恢复等工具，进一步简化内容创作与调试流程。
+rainwright-about-tab|关于
+rainwright-about-subtitle|雨世界开发者工具重构
+rainwright-about-overview|工具定位
+rainwright-about-workspace|统一工作环境
+rainwright-about-tools|创作与调试
+rainwright-about-cover|封面图
+rainwright-tab-ui|界面
+rainwright-tab-edit|编辑
+rainwright-tab-keys|按键
+rainwright-tab-save|保存
+rainwright-tab-presets|预设
+rainwright-tab-style|外观

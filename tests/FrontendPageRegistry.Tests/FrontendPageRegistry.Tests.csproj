@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <LangVersion>13</LangVersion>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../../src/Rainwright/Rainwright.csproj"
+                      AdditionalProperties="RainwrightStandaloneSmokeTest=true;DeployToGame=false" />
+    <!-- Actual game page registry bridge, not a test-only reimplementation. -->
+    <Compile Include="../../src/Rainwright/Game/DevTool/RWImGui/Shell/Pages/DevToolPageViewRegistry.cs"
+             Link="Production/DevToolPageViewRegistry.cs" />
+  </ItemGroup>
+</Project>

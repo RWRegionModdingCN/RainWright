@@ -1,0 +1,837 @@
+using System;
+using System.Collections.Generic;
+using System.Diagnostics;
+using DryCycle.DevUI.DevTool.World;
+using UnityEngine;
+using Num = System.Numerics;
+
+namespace DryCycle.DevUI.DevTool.RWImGui;
+
+/// <summary>
+/// Persistent GPU presentation for world-space connection routes.
+///
+/// Route points are independent of the camera. Meshes update only for source changes or a discrete
+/// stroke-width zoom band; uploads stay bounded and panning reuses the existing meshes.
+/// </summary>
+internal sealed class WorldMapRetainedConnectionRenderer
+{
+    private sealed class RouteObject
+    {
+        internal GameObject Root;
+        internal MeshFilter Filter;
+        internal MeshRenderer Renderer;
+        internal long Revision = long.MinValue;
+        internal ConnectionRouteResource PresentedRoute;
+        internal bool DepthEnabled;
+        internal MapPlaneFrame PlaneFrame;
+        internal int FocusLayer = -2;
+        internal float StrokeScale;
+    }
+
+    private const float CoreHalfWidth = 2.3f;
+    private const float ShadowHalfWidth = 3.3f;
+    private const float DashLength = 10f;
+    private const float DashGap = 6f;
+
+    private const float CrossingRadius = 6.4f;
+    private const float CrossingRise = 4.8f;
+    private const float DenseCrossingRadius = 5.2f;
+    private const float DenseCrossingRise = 3.7f;
+
+    private readonly Dictionary<string, RouteObject> routeObjects =
+        new(StringComparer.Ordinal);
+    private readonly HashSet<string> visibleNow =
+        new(StringComparer.Ordinal);
+    private readonly HashSet<string> visiblePrevious =
+        new(StringComparer.Ordinal);
+    private readonly List<string> stale = new();
+
+    private GameObject root;
+    private Material material;
+    private bool crossingDepth;
+    private float crossingStrokeScale;
+    private MapPlaneFrame crossingFrame;
+    private int crossingFocus = -2;
+    private Shader shader;
+    private GameObject crossingObject;
+    private MeshFilter crossingFilter;
+    private MeshRenderer crossingRenderer;
+    private long crossingRevision = long.MinValue;
+    private readonly HashSet<string> crossingVisibleRouteIds =
+        new(StringComparer.Ordinal);
+    private bool crossingHasGeometry;
+
+    internal int RetainedRouteCount => routeObjects.Count;
+    internal long Revision { get; private set; }
+    internal bool HasPendingUploads { get; private set; }
+    internal bool TryGetPresentedRoute(string id, out ConnectionRouteResource route)
+    {
+        route = routeObjects.TryGetValue(id, out RouteObject obj) ? obj.PresentedRoute : null;
+        return route != null;
+    }
+
+    internal void ApplyDirty(WorldMapDirtySet dirty)
+    {
+        if (dirty == null) return;
+
+        foreach (string id in dirty.RemovedConnections)
+        {
+            visibleNow.Remove(id);
+            visiblePrevious.Remove(id);
+            RemoveRoute(id);
+        }
+    }
+
+    internal bool SynchronizeVisible(
+        WorldMapConnectionResourceStore resources,
+        IReadOnlyList<string> visibleRouteIds,
+        bool showConnections,
+        Transform renderScene, WorldMapViewTransform view = default)
+    {
+        if (resources == null || visibleRouteIds == null)
+            return false;
+        if (!EnsureResources(renderScene)) return false;
+        HasPendingUploads = false;
+
+        if (!showConnections)
+        {
+            HideVisible();
+            if (crossingObject != null) crossingObject.SetActive(false);
+            return true;
+        }
+
+        visibleNow.Clear();
+        long deadline = Stopwatch.GetTimestamp() + (long)(Stopwatch.Frequency * .0015d);
+        int uploads = 0;
+        float strokeScale = StrokeScaleForZoom(view.Zoom);
+
+        for (int i = 0; i < visibleRouteIds.Count; i++)
+        {
+            string id = visibleRouteIds[i];
+            if (string.IsNullOrEmpty(id) ||
+                !resources.TryGet(id, out ConnectionRouteResource route) ||
+                route?.Points == null ||
+                route.Points.Length < 2)
+                continue;
+
+            visibleNow.Add(id);
+            routeObjects.TryGetValue(id, out RouteObject obj);
+            if (obj == null || obj.Revision != route.Revision || !ReferenceEquals(obj.PresentedRoute, route) ||
+                obj.DepthEnabled != view.DepthEnabled || obj.FocusLayer != view.FocusLayer || !obj.PlaneFrame.Equals(view.PlaneFrame) || obj.StrokeScale != strokeScale)
+            {
+                if (uploads >= 6 || (uploads > 0 && Stopwatch.GetTimestamp() >= deadline))
+                {
+                    HasPendingUploads = true;
+                    if (obj == null) continue;
+                    var old = obj.PresentedRoute;
+                    if (old?.Points?.Length >= 2 &&
+                        (obj.DepthEnabled != view.DepthEnabled || obj.FocusLayer != view.FocusLayer || !obj.PlaneFrame.Equals(view.PlaneFrame) ||
+                         old.Points[0] != route.Points[0] ||
+                         old.Points[old.Points.Length - 1] != route.Points[route.Points.Length - 1] ||
+                         old.FromLayer != route.FromLayer || old.ToLayer != route.ToLayer))
+                    {
+                        obj.Root.SetActive(false);
+                        continue;
+                    }
+                }
+                else
+                {
+                    obj ??= GetOrCreate(id);
+                    ReplaceMesh(obj.Filter, BuildRouteMesh(route, view.DepthEnabled, view.FocusLayer, view.PlaneFrame, strokeScale));
+                    obj.Revision = route.Revision;
+                    obj.PresentedRoute = route;
+                    obj.DepthEnabled = view.DepthEnabled; obj.PlaneFrame = view.PlaneFrame;
+                    obj.FocusLayer = view.FocusLayer;
+                    obj.StrokeScale = strokeScale;
+                    Revision++;
+                    uploads++;
+                }
+            }
+
+            if (!obj.Root.activeSelf)
+                obj.Root.SetActive(true);
+        }
+
+        foreach (string id in visiblePrevious)
+        {
+            if (visibleNow.Contains(id)) continue;
+            if (routeObjects.TryGetValue(id, out RouteObject obj) && obj.Root.activeSelf)
+                obj.Root.SetActive(false);
+        }
+
+        visiblePrevious.Clear();
+        visiblePrevious.UnionWith(visibleNow);
+
+        stale.Clear();
+        foreach (string id in routeObjects.Keys)
+            if (!resources.Routes.ContainsKey(id))
+                stale.Add(id);
+        for (int i = 0; i < stale.Count; i++)
+            RemoveRoute(stale[i]);
+
+        if (!resources.CrossingsCurrent || HasPendingUploads)
+        {
+            if (crossingObject != null)
+                crossingObject.SetActive(false);
+        }
+        else
+        {
+            bool visibilityChanged =
+                !crossingVisibleRouteIds.SetEquals(
+                    visibleNow);
+
+            if (crossingRevision != resources.CrossingRevision ||
+                visibilityChanged || crossingDepth != view.DepthEnabled || crossingFocus != view.FocusLayer || !crossingFrame.Equals(view.PlaneFrame) || crossingStrokeScale != strokeScale)
+            {
+                if (uploads > 0 && Stopwatch.GetTimestamp() >= deadline)
+                {
+                    HasPendingUploads = true;
+                    crossingObject.SetActive(false);
+                    return true;
+                }
+                Mesh crossingMesh =
+                    BuildCrossingMesh(
+                        resources,
+                        visibleNow, view.DepthEnabled, view.FocusLayer, view.PlaneFrame, strokeScale);
+
+                ReplaceMesh(
+                    crossingFilter,
+                    crossingMesh);
+
+                crossingDepth = view.DepthEnabled; crossingFrame = view.PlaneFrame; crossingFocus = view.FocusLayer; crossingStrokeScale = strokeScale;
+                crossingRevision =
+                    resources.CrossingRevision;
+                crossingVisibleRouteIds.Clear();
+                crossingVisibleRouteIds.UnionWith(
+                    visibleNow);
+                crossingHasGeometry =
+                    crossingMesh != null;
+                Revision++;
+            }
+
+            if (crossingObject != null)
+                crossingObject.SetActive(
+                    crossingHasGeometry);
+        }
+
+        return true;
+    }
+
+    internal void Reset()
+    {
+        HasPendingUploads = false;
+        Revision++;
+        foreach (RouteObject route in routeObjects.Values)
+            DestroyRouteObject(route);
+        routeObjects.Clear();
+        visibleNow.Clear();
+        visiblePrevious.Clear();
+        stale.Clear();
+
+        if (crossingFilter?.sharedMesh != null)
+            UnityEngine.Object.Destroy(crossingFilter.sharedMesh);
+        if (crossingObject != null)
+            UnityEngine.Object.Destroy(crossingObject);
+        crossingObject = null;
+        crossingFilter = null;
+        crossingRenderer = null;
+        crossingRevision = long.MinValue;
+        crossingVisibleRouteIds.Clear();
+        crossingHasGeometry = false;
+
+        if (material != null)
+            UnityEngine.Object.Destroy(material);
+        material = null;
+        shader = null;
+
+        if (root != null)
+            UnityEngine.Object.Destroy(root);
+        root = null;
+    }
+
+    private bool EnsureResources(Transform renderScene)
+    {
+        if (renderScene == null) throw new ArgumentNullException(nameof(renderScene));
+        if (root == null)
+        {
+            root = new GameObject("DryCycle.WorldMapV2.Connections")
+            {
+                hideFlags = HideFlags.HideAndDontSave,
+                layer = WorldMapRenderTextureSurface.RenderLayer
+            };
+        }
+        if (root.transform.parent != renderScene)
+            root.transform.SetParent(renderScene, false);
+
+        if (shader == null)
+        {
+            shader =
+                Shader.Find("Sprites/Default") ??
+                Shader.Find("Unlit/Transparent") ??
+                Shader.Find("UI/Default");
+            if (shader == null) return false;
+        }
+
+        if (material == null)
+        {
+            material = new Material(shader)
+            {
+                name = "DryCycle.WorldMapV2.Connections",
+                hideFlags = HideFlags.HideAndDontSave,
+                mainTexture = Texture2D.whiteTexture
+            };
+        }
+
+        if (crossingObject == null)
+        {
+            crossingObject = new GameObject("CrossingBridges")
+            {
+                hideFlags = HideFlags.HideAndDontSave,
+                layer = WorldMapRenderTextureSurface.RenderLayer
+            };
+            crossingObject.transform.SetParent(root.transform, false);
+            crossingFilter = crossingObject.AddComponent<MeshFilter>();
+            crossingRenderer = crossingObject.AddComponent<MeshRenderer>();
+            crossingRenderer.sortingOrder = 13;
+            crossingRenderer.sharedMaterial = material;
+        }
+
+        return true;
+    }
+
+    private RouteObject GetOrCreate(string id)
+    {
+        if (routeObjects.TryGetValue(id, out RouteObject existing))
+            return existing;
+
+        GameObject obj = new("Route_" + id)
+        {
+            hideFlags = HideFlags.HideAndDontSave,
+            layer = WorldMapRenderTextureSurface.RenderLayer
+        };
+        obj.transform.SetParent(root.transform, false);
+        MeshFilter filter = obj.AddComponent<MeshFilter>();
+        MeshRenderer renderer = obj.AddComponent<MeshRenderer>();
+        renderer.sortingOrder = 12;
+        renderer.sharedMaterial = material;
+
+        RouteObject created = new()
+        {
+            Root = obj,
+            Filter = filter,
+            Renderer = renderer
+        };
+        routeObjects.Add(id, created);
+        return created;
+    }
+
+    private static Mesh BuildRouteMesh(ConnectionRouteResource route, bool depthEnabled = false, int focusLayer = -1, MapPlaneFrame frame = default, float strokeScale = 1f)
+    {
+        if (route.Points == null || route.Points.Length < 2) return null;
+        var rounded = new List<Num.Vector2>(route.Points.Length * 5);
+        WorldMapConnectionDrawing.RoundCorners(MapDepthProjection.ProjectRoute(route.Points,
+            route.FromLayer, route.ToLayer, depthEnabled, frame), rounded, WorldMapConnectionDrawing.CornerRadius);
+        Num.Vector2[] path = rounded.ToArray();
+
+        List<Vector3> vertices = new();
+        List<Color32> colors = new();
+        List<int> indices = new();
+
+        Color32 shadow = new(4, 5, 7, 238);
+        Color32 core = RouteColor(route);
+        float opacity = System.Math.Max(MapDepthProjection.Opacity(route.FromLayer, depthEnabled, focusLayer),
+            MapDepthProjection.Opacity(route.ToLayer, depthEnabled, focusLayer));
+        core.a = (byte)System.Math.Round(core.a * opacity);
+        shadow.a = (byte)System.Math.Round(shadow.a * opacity);
+        float coreHalfWidth =
+            RouteCoreHalfWidth(route) * strokeScale;
+        float shadowHalfWidth =
+            RouteShadowHalfWidth(route) * strokeScale;
+
+        if (route.Ambiguous || route.Kind == WorldMapOrthogonalRouter.RouteKind.Obstructed)
+        {
+            AddDashedPath(
+                vertices,
+                colors,
+                indices,
+                path,
+                shadowHalfWidth,
+                shadow,
+                0.08f);
+            AddDashedPath(
+                vertices,
+                colors,
+                indices,
+                path,
+                coreHalfWidth,
+                core,
+                0.04f);
+        }
+        else
+        {
+            AddPath(
+                vertices,
+                colors,
+                indices,
+                path,
+                shadowHalfWidth,
+                shadow,
+                0.08f);
+            AddPath(vertices, colors, indices, path, coreHalfWidth, core, 0.04f);
+        }
+
+        // Flow markers are drawn in screen space by WorldMapView. Baking them into this mesh made
+        // them disappear at overview zoom and become huge when zooming into adjacent sockets.
+
+        if (indices.Count == 0) return null;
+        Mesh mesh = NewMesh("DryCycle WorldMap V2 Route");
+        EnsureIndexFormat(mesh, vertices.Count);
+        mesh.vertices = vertices.ToArray();
+        mesh.colors32 = colors.ToArray();
+        mesh.triangles = indices.ToArray();
+        mesh.RecalculateBounds();
+        return mesh;
+    }
+
+    private static Mesh BuildCrossingMesh(
+        WorldMapConnectionResourceStore resources,
+        HashSet<string> visibleRouteIds, bool depthEnabled = false, int focusLayer = -1, MapPlaneFrame frame = default, float strokeScale = 1f)
+    {
+        if (resources == null ||
+            visibleRouteIds == null ||
+            visibleRouteIds.Count == 0 ||
+            resources.Crossings.Count == 0)
+            return null;
+
+        int crossingCount =
+            resources.Crossings.Count;
+        int estimatedVertices =
+            Math.Min(
+                65536,
+                crossingCount * 36);
+
+        List<Vector3> vertices =
+            new(estimatedVertices);
+        List<Color32> colors =
+            new(estimatedVertices);
+        List<int> indices =
+            new(
+                Math.Min(
+                    98304,
+                    crossingCount * 54));
+
+        Color32 mask = new(4, 5, 7, 255);
+        Color32 bridgeShadow = new(4, 5, 7, 238);
+
+        for (int i = 0; i < resources.Crossings.Count; i++)
+        {
+            WorldMapCrossingMark mark =
+                resources.Crossings[i];
+
+            if (!visibleRouteIds.Contains(
+                    mark.OverRouteId) ||
+                !visibleRouteIds.Contains(
+                    mark.UnderRouteId))
+                continue;
+
+            if (!resources.TryGet(
+                    mark.OverRouteId,
+                    out ConnectionRouteResource overRoute) ||
+                !resources.TryGet(
+                    mark.UnderRouteId,
+                    out ConnectionRouteResource underRoute))
+                continue;
+
+            Num.Vector2 tangent =
+                Normalize(mark.Tangent);
+            if (tangent.LengthSquared() < 0.5f)
+                continue;
+
+            Num.Vector2 point = MapDepthProjection.Project(mark.Point, overRoute.FromLayer, depthEnabled, frame);
+            Num.Vector2 normal =
+                new(-tangent.Y, tangent.X);
+            float radius =
+                mark.Dense
+                    ? DenseCrossingRadius
+                    : CrossingRadius;
+            float riseHeight =
+                mark.Dense
+                    ? DenseCrossingRise
+                    : CrossingRise;
+
+            float overShadowHalfWidth =
+                RouteShadowHalfWidth(
+                    overRoute) * strokeScale;
+            float overCoreHalfWidth =
+                RouteCoreHalfWidth(
+                    overRoute) * strokeScale;
+            float underShadowHalfWidth =
+                RouteShadowHalfWidth(
+                    underRoute) * strokeScale;
+            float underGapHalfLength =
+                mark.Dense
+                    ? 4.8f
+                    : 6.4f;
+
+            // Crossing grammar has two separate operations:
+            //  1) cut a real gap in the under-route;
+            //  2) remove the straight over-route segment that will be replaced by the bridge arc.
+            // The old renderer did only (2), so a dark shadow could still read as a welded junction
+            // when several routes crossed in a compact area.
+            AddThickSegment(
+                vertices,
+                colors,
+                indices,
+                point - normal * underGapHalfLength,
+                point + normal * underGapHalfLength,
+                underShadowHalfWidth + 1.35f,
+                mask,
+                -0.018f);
+
+            AddThickSegment(
+                vertices,
+                colors,
+                indices,
+                point - tangent * (radius + 2.5f),
+                point + tangent * (radius + 2.5f),
+                overShadowHalfWidth + 1.2f,
+                mask,
+                -0.02f);
+
+            Color32 core = RouteColor(overRoute);
+
+            int arcSegments =
+                mark.Dense ? 3 : 6;
+            Num.Vector2 previous =
+                point - tangent * radius;
+
+            for (int segment = 1; segment <= arcSegments; segment++)
+            {
+                float t =
+                    segment /
+                    (float)arcSegments;
+                float along =
+                    (-1f + t * 2f) *
+                    radius;
+                float rise =
+                    (float)Math.Sin(Math.PI * t) *
+                    riseHeight;
+
+                Num.Vector2 current =
+                    point +
+                    tangent * along +
+                    normal * rise;
+
+                AddThickSegment(
+                    vertices,
+                    colors,
+                    indices,
+                    previous,
+                    current,
+                    overShadowHalfWidth,
+                    bridgeShadow,
+                    -0.055f);
+
+                AddThickSegment(
+                    vertices,
+                    colors,
+                    indices,
+                    previous,
+                    current,
+                    overCoreHalfWidth,
+                    core,
+                    -0.08f);
+
+                previous = current;
+            }
+        }
+
+        if (indices.Count == 0)
+            return null;
+
+        Mesh mesh =
+            NewMesh("DryCycle WorldMap V2 Crossings");
+        EnsureIndexFormat(mesh, vertices.Count);
+        mesh.vertices = vertices.ToArray();
+        mesh.colors32 = colors.ToArray();
+        mesh.triangles = indices.ToArray();
+        mesh.RecalculateBounds();
+        return mesh;
+    }
+
+    private static void AddPath(
+        List<Vector3> vertices,
+        List<Color32> colors,
+        List<int> indices,
+        Num.Vector2[] path,
+        float halfWidth,
+        Color32 color,
+        float z)
+    {
+        for (int i = 0; i < path.Length - 1; i++)
+        {
+            AddThickSegment(
+                vertices,
+                colors,
+                indices,
+                path[i],
+                path[i + 1],
+                halfWidth,
+                color,
+                z);
+        }
+
+        for (int i = 1; i < path.Length - 1; i++)
+        {
+            AddRoundJoin(
+                vertices,
+                colors,
+                indices,
+                path[i],
+                halfWidth,
+                color,
+                z);
+        }
+    }
+
+    private static void AddRoundJoin(
+        List<Vector3> vertices,
+        List<Color32> colors,
+        List<int> indices,
+        Num.Vector2 center,
+        float radius,
+        Color32 color,
+        float z)
+    {
+        const int segments = 8;
+        if (radius <= 0.001f)
+            return;
+
+        int first = vertices.Count;
+        vertices.Add(ToUnity(center, z));
+        colors.Add(color);
+
+        for (int i = 0; i <= segments; i++)
+        {
+            float angle = (float)(Math.PI * 2.0 * i / segments);
+            Num.Vector2 point = center + new Num.Vector2(
+                (float)Math.Cos(angle),
+                (float)Math.Sin(angle)) * radius;
+            vertices.Add(ToUnity(point, z));
+            colors.Add(color);
+        }
+
+        for (int i = 0; i < segments; i++)
+        {
+            indices.Add(first);
+            indices.Add(first + i + 1);
+            indices.Add(first + i + 2);
+        }
+    }
+
+    private static void AddDashedPath(
+        List<Vector3> vertices,
+        List<Color32> colors,
+        List<int> indices,
+        Num.Vector2[] path,
+        float halfWidth,
+        Color32 color,
+        float z)
+    {
+        double totalLength = 0d;
+        for (int i = 0; i < path.Length - 1; i++)
+            totalLength += Num.Vector2.Distance(path[i], path[i + 1]);
+        double scale = WorldMapDashSegmentEnumerator.ScaleForLength(totalLength, DashLength, DashGap);
+        double phase = 0d;
+
+        for (int i = 0; i < path.Length - 1; i++)
+        {
+            Num.Vector2 a = path[i];
+            Num.Vector2 b = path[i + 1];
+            Num.Vector2 delta = b - a;
+            float length = delta.Length();
+            if (length <= 0.001f) continue;
+            Num.Vector2 direction = delta / length;
+
+            var spans = new WorldMapDashSegmentEnumerator(length, phase, DashLength * scale, DashGap * scale);
+            while (spans.MoveNext())
+            {
+                float distance = (float)spans.Start;
+                float end = (float)spans.End;
+                float segmentHalfWidth =
+                    i == 0 ||
+                    i == path.Length - 2
+                        ? halfWidth * 0.72f
+                        : halfWidth;
+
+                AddThickSegment(
+                    vertices,
+                    colors,
+                    indices,
+                    a + direction * distance,
+                    a + direction * end,
+                    segmentHalfWidth,
+                    color,
+                    z);
+            }
+
+            phase = spans.NextPhase;
+        }
+    }
+
+    private static void AddThickSegment(
+        List<Vector3> vertices,
+        List<Color32> colors,
+        List<int> indices,
+        Num.Vector2 a,
+        Num.Vector2 b,
+        float halfWidth,
+        Color32 color,
+        float z)
+    {
+        Num.Vector2 delta = b - a;
+        float length = delta.Length();
+        if (length <= 0.001f) return;
+
+        Num.Vector2 direction = delta / length;
+        Num.Vector2 normal = new(-direction.Y, direction.X);
+        Num.Vector2 offset = normal * halfWidth;
+
+        int first = vertices.Count;
+        vertices.Add(ToUnity(a + offset, z));
+        vertices.Add(ToUnity(b + offset, z));
+        vertices.Add(ToUnity(b - offset, z));
+        vertices.Add(ToUnity(a - offset, z));
+        colors.Add(color);
+        colors.Add(color);
+        colors.Add(color);
+        colors.Add(color);
+
+        indices.Add(first);
+        indices.Add(first + 1);
+        indices.Add(first + 2);
+        indices.Add(first);
+        indices.Add(first + 2);
+        indices.Add(first + 3);
+    }
+
+    private static float PathLength(Num.Vector2[] path)
+    {
+        float length = 0f;
+        if (path == null) return 0f;
+        for (int i = 0; i < path.Length - 1; i++)
+            length += Num.Vector2.Distance(path[i], path[i + 1]);
+        return length;
+    }
+
+    private void HideVisible()
+    {
+        foreach (string id in visiblePrevious)
+        {
+            if (routeObjects.TryGetValue(id, out RouteObject obj) && obj.Root.activeSelf)
+                obj.Root.SetActive(false);
+        }
+        visibleNow.Clear();
+        visiblePrevious.Clear();
+    }
+
+    private void RemoveRoute(string id)
+    {
+        if (!routeObjects.TryGetValue(id, out RouteObject obj)) return;
+        routeObjects.Remove(id);
+        DestroyRouteObject(obj);
+    }
+
+    private static void DestroyRouteObject(RouteObject obj)
+    {
+        if (obj == null) return;
+        if (obj.Filter?.sharedMesh != null)
+            UnityEngine.Object.Destroy(obj.Filter.sharedMesh);
+        if (obj.Root != null)
+            UnityEngine.Object.Destroy(obj.Root);
+    }
+
+    private static void ReplaceMesh(MeshFilter filter, Mesh next)
+    {
+        Mesh previous = filter.sharedMesh;
+        filter.sharedMesh = next;
+        if (previous != null)
+            UnityEngine.Object.Destroy(previous);
+    }
+
+    private static Mesh NewMesh(string name) =>
+        new()
+        {
+            name = name,
+            hideFlags = HideFlags.HideAndDontSave
+        };
+
+    private static void EnsureIndexFormat(
+        Mesh mesh,
+        int vertexCount)
+    {
+        if (mesh == null ||
+            vertexCount <= 65535)
+            return;
+
+        mesh.indexFormat =
+            UnityEngine.Rendering.IndexFormat.UInt32;
+    }
+
+    private static Vector3 ToUnity(Num.Vector2 point, float z) =>
+        new(point.X, -point.Y, z - 1f);
+
+    private static Num.Vector2 Normalize(Num.Vector2 value)
+    {
+        float length = value.Length();
+        return length <= 0.0001f ? Num.Vector2.Zero : value / length;
+    }
+
+    private static float RouteCoreHalfWidth(
+        ConnectionRouteResource route)
+    {
+        byte tier =
+            route?.DensityTier ?? 0;
+
+        if (tier >= 2)
+            return 1.75f;
+        if (tier == 1)
+            return 2.05f;
+        return CoreHalfWidth;
+    }
+
+    private static float RouteShadowHalfWidth(
+        ConnectionRouteResource route)
+    {
+        byte tier =
+            route?.DensityTier ?? 0;
+
+        if (tier >= 2)
+            return 2.75f;
+        if (tier == 1)
+            return 3.05f;
+        return ShadowHalfWidth;
+    }
+
+    private static Color32 RouteColor(ConnectionRouteResource route)
+    {
+        if (route?.Kind == WorldMapOrthogonalRouter.RouteKind.Obstructed)
+            return new Color32(255, 173, 128, 245);
+        if (route?.Ambiguous == true)
+            return new Color32(150, 155, 164, 220);
+
+        uint color = WorldMapConnectionDrawing.RouteGold;
+        return new Color32((byte)color,(byte)(color >> 8),(byte)(color >> 16),245);
+    }
+
+    // Line width uses a small set of zoom bands. Pan and zoom within a band reuse meshes;
+    // crossing a band schedules only presentation uploads under the existing per-frame budget.
+    // Native route points, routing revisions and hit-test geometry are never recomputed here.
+    private static float StrokeScaleForZoom(float zoom)
+    {
+        if (float.IsNaN(zoom) || float.IsInfinity(zoom) || zoom <= 0f) return 1f;
+        float band = .0625f;
+        for (int i = 0; i < 8 && band < zoom; i++) band *= 2f;
+        return 1f / band;
+    }
+}

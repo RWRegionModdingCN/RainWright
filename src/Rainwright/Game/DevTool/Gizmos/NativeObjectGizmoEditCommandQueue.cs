@@ -1,0 +1,628 @@
+using System;
+using System.Collections.Concurrent;
+using DryCycle.DevUI.DevTool.Core;
+using DryCycle.DevUI.DevTool.Compatibility;
+using DryCycle.DevUI.DevTool.History;
+using DryCycle.DevUI.DevTool.Objects;
+using RWCustom;
+using UnityEngine;
+
+namespace DryCycle.DevUI.DevTool.Gizmos;
+
+internal static class NativeObjectGizmoEditCommandProcessor
+{
+    internal static void Process(EditorSession session)
+    {
+        while (NativeObjectGizmoEditCommandQueue.TryDequeue(out NativeObjectGizmoEditCommand command))
+        {
+            try
+            {
+                ProcessOne(session, command);
+            }
+            catch (Exception error)
+            {
+                global::DryCycle.DevUI.DevTool.Core.EditorDiagnostics.LogSource?.LogWarning("DevTool native object gizmo edit failed: " + error.Message);
+            }
+        }
+    }
+
+    internal static void Clear() => NativeObjectGizmoEditCommandQueue.Clear();
+
+    private static void ProcessOne(EditorSession session, NativeObjectGizmoEditCommand command)
+    {
+        if (session == null)
+            return;
+
+        // Deactivation can enqueue Cancel after ToolMode has already switched away from Objects.
+        // Cancel belongs to the transaction lifecycle, not to the currently visible page, so it
+        // must be allowed to drain off-page. It also has to clear the transaction even when the
+        // target temporarily cannot be resolved by its former collection index.
+        if (command.Kind == NativeObjectGizmoEditKind.Cancel)
+        {
+            if (string.IsNullOrEmpty(command.HandleId))
+                return;
+
+            string cancelKey = TransactionKey(command.ObjectIndex, command.StableId, command.HandleId);
+            if (!EditorContinuousTransactionHub.Cancel(session, cancelKey))
+                return;
+
+            PlacedObject restoredTarget = ObjectAt(session, command.ObjectIndex, command.StableId);
+            if (restoredTarget != null)
+            {
+                NativeObjectRuntimeReconciler.RefreshAfterMutation(session, restoredTarget);
+                MarkChanged(session, restoredTarget);
+            }
+            return;
+        }
+
+        if (session.ToolMode != EditorToolMode.Objects)
+            return;
+
+        PlacedObject target = ObjectAt(session, command.ObjectIndex, command.StableId);
+        if (target == null)
+            return;
+
+        if (command.Kind == NativeObjectGizmoEditKind.InsertCurvePoint)
+        {
+            ExecuteDiscrete(
+                session,
+                target,
+                "Split spline segment",
+                () => SplitSpline(target, command.SegmentIndex, command.CurveT));
+            return;
+        }
+
+        if (command.Kind == NativeObjectGizmoEditKind.RemoveHandle)
+        {
+            ExecuteDiscrete(
+                session,
+                target,
+                "Join spline segments",
+                () => RemoveSplineMidpoint(target, command.HandleId));
+            return;
+        }
+
+        if (string.IsNullOrEmpty(command.HandleId))
+            return;
+
+        string transactionKey = TransactionKey(command.ObjectIndex, command.StableId, command.HandleId);
+        switch (command.Kind)
+        {
+            case NativeObjectGizmoEditKind.Begin:
+            {
+                NativeObjectRuntimeReconciler.PrepareForMutation(session, target);
+                IEditorStateSnapshot before =
+                    SinglePlacedObjectStateSnapshot.Capture(session.RoomSettings, target);
+                if (before != null)
+                    EditorContinuousTransactionHub.Begin(
+                        session,
+                        transactionKey,
+                        "Move object gizmo",
+                        before);
+                break;
+            }
+
+            case NativeObjectGizmoEditKind.Update:
+                if (EditorContinuousTransactionHub.IsActive(session, transactionKey) &&
+                    ApplyDrag(session, target, command))
+                {
+                    MarkChanged(session, target);
+                }
+                break;
+
+            case NativeObjectGizmoEditKind.Commit:
+                if (EditorContinuousTransactionHub.Commit(session, transactionKey))
+                    NativeObjectRuntimeReconciler.FinalizeInteractiveMutation(session, target);
+                break;
+
+        }
+    }
+
+    private static bool ApplyDrag(
+        EditorSession session,
+        PlacedObject target,
+        NativeObjectGizmoEditCommand command)
+    {
+        if (command.HandleId.StartsWith("property:", StringComparison.Ordinal))
+        {
+            string propertyKey = command.HandleId.Substring("property:".Length);
+            Vector2 relative = new Vector2(command.X, command.Y) - target.pos;
+            if (!ObjectInspectorRegistry.TryBuildGizmoValue(
+                    target,
+                    propertyKey,
+                    relative.x,
+                    relative.y,
+                    command.Snap,
+                    out EditorPropertyValue value))
+                return false;
+
+            return ObjectInspectorRegistry.TrySetValue(target, propertyKey, value);
+        }
+
+        if (target.data is WaterCurrent.WaterCurrentData water &&
+            ApplyWaterCurrent(target, water, command))
+            return true;
+
+        if (ModManager.Watcher &&
+            target.data is Watcher.FlameJet.FlameJetData flameJet &&
+            command.HandleId == "flameJet:target")
+        {
+            flameJet.target = new Vector2(command.X, command.Y) - target.pos;
+            return true;
+        }
+
+        if (ModManager.Watcher &&
+            target.data is Watcher.KarmaFlowerPatch.KarmaFlowerPatchData karmaPatch &&
+            command.HandleId == "karmaPatch:tilt")
+        {
+            Vector2 relative = new Vector2(command.X, command.Y) - target.pos;
+            float sqrMagnitude = karmaPatch.handlePos.sqrMagnitude;
+            karmaPatch.tilt = sqrMagnitude <= 0.0001f
+                ? 0f
+                : Mathf.Clamp01(Vector2.Dot(relative, karmaPatch.handlePos / sqrMagnitude));
+            return true;
+        }
+
+        if (target.data is PlacedObject.LightningMachineData lightning)
+        {
+            if (command.HandleId == "lightning:start")
+            {
+                lightning.startPoint = new Vector2(command.X, command.Y) - target.pos;
+                return true;
+            }
+
+            if (command.HandleId == "lightning:end")
+            {
+                lightning.endPoint = new Vector2(command.X, command.Y) - target.pos;
+                return true;
+            }
+        }
+
+        if (ModManager.Watcher &&
+            target.type == Watcher.WatcherEnums.PlacedObjectType.WeaverSpot &&
+            target.data is PlacedObject.ResizableObjectData weaver &&
+            command.HandleId == "weaver:direction")
+        {
+            Vector2 direction = new Vector2(command.X, command.Y) - target.pos;
+            if (direction.sqrMagnitude <= 0.0001f)
+                direction = Vector2.up;
+            weaver.handlePos = direction.normalized * 460f;
+            return true;
+        }
+
+        if (ModManager.Watcher &&
+            target.data is Watcher.AetherRainbow.AetherRainbowData aether)
+        {
+            Vector2 relative = new Vector2(command.X, command.Y) - target.pos;
+            switch (command.HandleId)
+            {
+                case "aether:start": aether.start = relative; return true;
+                case "aether:arch": aether.arch = relative; return true;
+                case "aether:end": aether.end = relative; return true;
+                case "aether:startDepth": aether.startDepth = (relative.x - aether.start.x) * 0.01f; return true;
+                case "aether:archDepth": aether.archDepth = (relative.x - aether.arch.x) * 0.01f; return true;
+                case "aether:endDepth": aether.endDepth = (relative.x - aether.end.x) * 0.01f; return true;
+                case "aether:startWidth": aether.startWidth = (relative.x - aether.start.x) * 0.01f; return true;
+                case "aether:archWidth": aether.archWidth = (relative.x - aether.arch.x) * 0.01f; return true;
+                case "aether:endWidth": aether.endWidth = (relative.x - aether.end.x) * 0.01f; return true;
+            }
+        }
+
+        if (ModManager.Watcher &&
+            target.data is Watcher.WallLight.WallLightData wallLight)
+        {
+            Vector2 relative = new Vector2(command.X, command.Y) - target.pos;
+            switch (command.HandleId)
+            {
+                case "wallLight:up":
+                    wallLight.up = relative;
+                    return true;
+                case "wallLight:right":
+                    wallLight.right = relative;
+                    return true;
+                case "wallLight:one":
+                    wallLight.one = relative;
+                    return true;
+            }
+        }
+
+        if (ModManager.Watcher &&
+            target.data is LobeTree.LobeTreeData lobeTree &&
+            command.HandleId == "lobeTree:root")
+        {
+            lobeTree.rootOffset = new Vector2(command.X, command.Y) - target.pos;
+            return true;
+        }
+
+        if (ModManager.Watcher &&
+            target.data is Watcher.UrbanCandlePlacer.UrbanCandlePlacerData candlePlacer)
+        {
+            Vector2 world = new Vector2(command.X, command.Y);
+            switch (command.HandleId)
+            {
+                case "urbanCandle:brush":
+                    candlePlacer.brushHandlePos = world;
+                    return true;
+                case "urbanCandle:radius":
+                    candlePlacer.handlePos = world - candlePlacer.brushHandlePos;
+                    candlePlacer.radius = candlePlacer.handlePos.magnitude;
+                    return true;
+            }
+        }
+
+        if (ModManager.Watcher &&
+            target.data is Watcher.UrbanLife.UrbanLifeData urbanLife)
+        {
+            Vector2 relative = new Vector2(command.X, command.Y) - target.pos;
+            switch (command.HandleId)
+            {
+                case "urbanLife:upLeft":
+                    urbanLife.upLeft = relative;
+                    return true;
+                case "urbanLife:downRight":
+                    urbanLife.downRight = relative;
+                    return true;
+                case "urbanLife:direction":
+                    urbanLife.direction = relative;
+                    return true;
+                case "urbanLife:scale":
+                    urbanLife.scale = relative.x - urbanLife.direction.x;
+                    return true;
+            }
+        }
+
+        if (ModManager.Watcher &&
+            target.data is Watcher.UrbanLifePath.UrbanLifePathData urbanPath)
+        {
+            Vector2 relative = new Vector2(command.X, command.Y) - target.pos;
+            switch (command.HandleId)
+            {
+                case "urbanPath:pointA":
+                    urbanPath.pointA = relative;
+                    return true;
+                case "urbanPath:pointB":
+                    urbanPath.pointB = relative;
+                    return true;
+            }
+        }
+
+        if (ModManager.Watcher &&
+            target.data is Watcher.GrassBlade.TerrainGrassPatchData grassPatch &&
+            ApplyTerrainGrassPatch(target, grassPatch, command))
+            return true;
+
+        if (target.data is WaterCutoffData waterCutoff &&
+            command.HandleId == "waterCutoff:end")
+        {
+            Vector2 relative = new Vector2(command.X, command.Y) - target.pos;
+            if (!command.Snap)
+                relative.y = 0f;
+            waterCutoff.handlePos = relative;
+            return true;
+        }
+
+        if (target.data is AirPocketData airPocket)
+        {
+            if (command.HandleId == "airPocket:corner")
+            {
+                airPocket.handlePos = new Vector2(command.X, command.Y) - target.pos;
+                return true;
+            }
+
+            if (command.HandleId == "airPocket:waterLevel")
+            {
+                airPocket.waterLevel = command.Y - target.pos.y;
+                return true;
+            }
+        }
+
+        if (target.data is MudPit.MudPitData mudPit &&
+            command.HandleId == "mudPit:decalSize")
+        {
+            mudPit.decalSize = command.X - target.pos.x;
+            return true;
+        }
+
+        if (target.data is PlacedObject.LocalTerrainData localTerrain &&
+            command.HandleId == "localTerrain:bottom")
+        {
+            localTerrain.bottom = Mathf.Max(0f, target.pos.y - command.Y);
+            return true;
+        }
+
+        if (target.data is PlacedObject.SuperSlopeData superSlope &&
+            command.HandleId == "superSlope:bottom")
+        {
+            superSlope.bottom = Mathf.Max(10f, target.pos.y - command.Y);
+            return true;
+        }
+
+        if (target.data is PlacedObject.WaterFlowData waterFlow &&
+            command.HandleId == "waterFlow:width")
+        {
+            waterFlow.width = Mathf.Max(
+                Mathf.RoundToInt((command.X - target.pos.x) / 20f),
+                1);
+            return true;
+        }
+
+        if (target.data is PlacedObject.SplineObjectData splineData &&
+            splineData.spline != null &&
+            ApplySpline(target, splineData.spline, command))
+            return true;
+
+        return false;
+    }
+
+    private static bool ApplyTerrainGrassPatch(
+        PlacedObject target,
+        Watcher.GrassBlade.TerrainGrassPatchData data,
+        NativeObjectGizmoEditCommand command)
+    {
+        float dx = command.X - target.pos.x;
+        float dy = command.Y - target.pos.y;
+
+        switch (command.HandleId)
+        {
+            case "terrainGrass:range":
+                data.range = Mathf.Abs(dx);
+                return true;
+            case "terrainGrass:fallOff":
+                data.fallOff = Mathf.Clamp01(dx / 200f);
+                return true;
+            case "terrainGrass:width":
+                data.width = Mathf.Clamp(dx / 50f, 0f, 4f);
+                return true;
+            case "terrainGrass:depthOffset":
+                data.depthOffset = Mathf.Clamp01(dx / 200f + 0.5f);
+                return true;
+            case "terrainGrass:depthRange":
+                data.depthRange = Mathf.Clamp01(dx / 100f);
+                return true;
+            case "terrainGrass:amount":
+                data.amount = Mathf.Clamp(Mathf.FloorToInt(Mathf.Max(0f, dy)), 0, 500) * 4;
+                return true;
+            case "terrainGrass:minHeight":
+                data.minHeight = Mathf.Clamp(dy, 0f, 1000f);
+                return true;
+            case "terrainGrass:maxHeight":
+                data.maxHeight = Mathf.Clamp(dy, 0f, 1000f);
+                return true;
+            default:
+                return false;
+        }
+    }
+
+    private static bool ApplyWaterCurrent(
+        PlacedObject target,
+        WaterCurrent.WaterCurrentData data,
+        NativeObjectGizmoEditCommand command)
+    {
+        Vector2 relative = new Vector2(command.X, command.Y) - target.pos;
+
+        switch (command.HandleId)
+        {
+            case "water:end":
+                if (command.Snap)
+                    relative = SnapEightDirections(relative);
+                data.handlePos = relative;
+                return true;
+
+            case "water:width":
+                data.width = relative.magnitude * 2f;
+                return true;
+
+            case "water:velocity":
+            {
+                Vector2 direction = data.handlePos.sqrMagnitude > 0.0001f
+                    ? data.handlePos.normalized
+                    : Vector2.up;
+                data.velocity = Vector2.Dot(relative - data.handlePos * 0.5f, direction);
+                return true;
+            }
+
+            default:
+                return false;
+        }
+    }
+
+    private static bool ApplySpline(
+        PlacedObject target,
+        BezierSpline spline,
+        NativeObjectGizmoEditCommand command)
+    {
+        Vector2 relative = new Vector2(command.X, command.Y) - target.pos;
+        int lastSegment = spline.Segments - 1;
+
+        if (command.HandleId == "spline:posB")
+        {
+            BezierCurve curve = spline.GetBezier(lastSegment);
+            Vector2 tangent = curve.handleB - curve.posB;
+            curve.posB = relative;
+            curve.handleB = relative + tangent;
+            spline.SetBezier(lastSegment, curve);
+            return true;
+        }
+
+        if (command.HandleId == "spline:handleA")
+        {
+            BezierCurve curve = spline.GetBezier(0);
+            curve.handleA = relative;
+            spline.SetBezier(0, curve);
+            return true;
+        }
+
+        if (command.HandleId == "spline:handleB")
+        {
+            BezierCurve curve = spline.GetBezier(lastSegment);
+            curve.handleB = relative;
+            spline.SetBezier(lastSegment, curve);
+            return true;
+        }
+
+        if (!TryParseMidpointHandle(command.HandleId, out int midpointIndex, out string part) ||
+            midpointIndex < 0 ||
+            midpointIndex >= spline.midpoints.Count)
+            return false;
+
+        BezierSpline.Midpoint midpoint = spline.midpoints[midpointIndex];
+        switch (part)
+        {
+            case "pos":
+                midpoint.pos = relative;
+                break;
+            case "dir1":
+                midpoint.dir1 = relative - midpoint.pos;
+                break;
+            case "dir2":
+                midpoint.dir2 = relative - midpoint.pos;
+                break;
+            default:
+                return false;
+        }
+
+        spline.midpoints[midpointIndex] = midpoint;
+        InvalidateMidpointSegments(spline, midpointIndex);
+        return true;
+    }
+
+    private static bool SplitSpline(PlacedObject target, int segmentIndex, float curveT)
+    {
+        if (target?.data is not PlacedObject.SplineObjectData data ||
+            data.spline == null ||
+            segmentIndex < 0 ||
+            segmentIndex >= data.spline.Segments)
+            return false;
+
+        BezierSpline spline = data.spline;
+        float t = Mathf.Clamp01(curveT);
+        spline.GetBezier(segmentIndex).Split(t, out BezierCurve first, out BezierCurve second);
+        spline.AddMidpoint(default, segmentIndex);
+        spline.SetBezier(segmentIndex, first);
+        spline.SetBezier(segmentIndex + 1, second);
+        return true;
+    }
+
+    private static bool RemoveSplineMidpoint(PlacedObject target, string handleId)
+    {
+        if (target?.data is not PlacedObject.SplineObjectData data ||
+            data.spline == null ||
+            !TryParseMidpointHandle(handleId, out int midpointIndex, out string part) ||
+            part != "pos" ||
+            midpointIndex < 0 ||
+            midpointIndex >= data.spline.midpoints.Count)
+            return false;
+
+        BezierSpline spline = data.spline;
+        float leftLength = Mathf.Max(0.001f, spline.GetSegmentLength(midpointIndex));
+        float rightLength = Mathf.Max(0.001f, spline.GetSegmentLength(midpointIndex + 1));
+        float totalLength = leftLength + rightLength;
+
+        if (midpointIndex == 0)
+        {
+            spline.handleA = spline.posA +
+                             (spline.handleA - spline.posA) * (totalLength / leftLength);
+        }
+        else
+        {
+            BezierSpline.Midpoint previous = spline.midpoints[midpointIndex - 1];
+            previous.dir2 *= Mathf.Min(totalLength / leftLength, 2f);
+            spline.midpoints[midpointIndex - 1] = previous;
+        }
+
+        if (midpointIndex == spline.midpoints.Count - 1)
+        {
+            spline.handleB = spline.posB +
+                             (spline.handleB - spline.posB) * (totalLength / rightLength);
+        }
+        else
+        {
+            BezierSpline.Midpoint next = spline.midpoints[midpointIndex + 1];
+            next.dir1 *= Mathf.Min(totalLength / rightLength, 2f);
+            spline.midpoints[midpointIndex + 1] = next;
+        }
+
+        spline.RemoveMidpoint(midpointIndex);
+        if (midpointIndex < spline.Segments)
+            spline.SetBezier(midpointIndex, spline.GetBezier(midpointIndex));
+        return true;
+    }
+
+    private static void ExecuteDiscrete(
+        EditorSession session,
+        PlacedObject target,
+        string label,
+        Func<bool> mutation)
+    {
+        IEditorStateSnapshot before =
+            SinglePlacedObjectStateSnapshot.Capture(session.RoomSettings, target);
+        if (before == null || mutation == null || !mutation())
+            return;
+
+        MarkChanged(session, target);
+
+        IEditorStateSnapshot after = before.CaptureCurrent(session);
+        if (SnapshotHistoryEntry.TryCreate(label, before, after, out SnapshotHistoryEntry entry))
+            session.History.Push(entry);
+    }
+
+    private static void InvalidateMidpointSegments(BezierSpline spline, int midpointIndex)
+    {
+        if (midpointIndex >= 0 && midpointIndex < spline.Segments)
+            spline.SetBezier(midpointIndex, spline.GetBezier(midpointIndex));
+        if (midpointIndex + 1 >= 0 && midpointIndex + 1 < spline.Segments)
+            spline.SetBezier(midpointIndex + 1, spline.GetBezier(midpointIndex + 1));
+    }
+
+    private static Vector2 SnapEightDirections(Vector2 value)
+    {
+        float absX = Mathf.Abs(value.x);
+        float absY = Mathf.Abs(value.y);
+
+        if (absX * 0.4142f < absY && absY * 0.4142f < absX)
+        {
+            Vector2 diagonal = new Vector2(Mathf.Sign(value.x), Mathf.Sign(value.y)).normalized;
+            return diagonal * Vector2.Dot(diagonal, value);
+        }
+
+        if (absX < absY)
+            value.x = 0f;
+        else
+            value.y = 0f;
+
+        return value;
+    }
+
+    private static bool TryParseMidpointHandle(
+        string handleId,
+        out int midpointIndex,
+        out string part)
+    {
+        midpointIndex = -1;
+        part = string.Empty;
+        if (string.IsNullOrEmpty(handleId) ||
+            !handleId.StartsWith("spline:mid:", StringComparison.Ordinal))
+            return false;
+
+        string[] pieces = handleId.Split(':');
+        return pieces.Length == 4 &&
+               int.TryParse(pieces[2], out midpointIndex) &&
+               !string.IsNullOrEmpty(part = pieces[3]);
+    }
+
+    private static void MarkChanged(EditorSession session, PlacedObject target)
+    {
+        NativeObjectRuntimeReconciler.RefreshInteractivePreview(session, target);
+        EditorRevisionHub.Mark(session, EditorRevisionKind.Objects);
+        ObjectPresentationChangeHintHub.MarkMember(session, target);
+    }
+
+    private static PlacedObject ObjectAt(EditorSession session, int index, long stableId = 0L) =>
+        ObjectPresentationIdentity.Resolve(session?.RoomSettings?.placedObjects, index, stableId);
+
+    private static string TransactionKey(int objectIndex, long stableId, string handleId)
+    {
+        long address = stableId != 0L ? stableId : objectIndex;
+        return "NativeObjectGizmo:" + address + ":" + handleId;
+    }
+}

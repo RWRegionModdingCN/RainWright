@@ -1,0 +1,867 @@
+using System;
+using System.Collections.Generic;
+using DryCycle.DevUI.DevTool.Objects;
+using DryCycle.DevUI.DevTool.Room;
+using ImGuiNET;
+using Num = System.Numerics;
+
+namespace DryCycle.DevUI.DevTool.RWImGui;
+
+internal static class RoomSettingsView
+{
+    private enum Section
+    {
+        Environment,
+        Palette,
+        Gameplay,
+        Terrain,
+        Templates,
+        Effects
+    }
+
+    private sealed class EffectBrowserRow
+    {
+        internal string Type;
+        internal string Category;
+        internal string Label;
+        internal Num.Vector4 SourceColor;
+    }
+
+    private sealed class EffectSliderBinding
+    {
+        internal string StateKey;
+        internal string WidgetId;
+        internal string DisplayName;
+    }
+
+    private sealed class EffectBinding
+    {
+        internal EditorRoomEffectSnapshot Effect;
+        internal string Header;
+        internal string RemoveId;
+        internal EffectSliderBinding[] Sliders = Array.Empty<EffectSliderBinding>();
+    }
+
+    private sealed class TemplateBinding
+    {
+        internal string Name;
+        internal string ComboLabel;
+        internal string SaveLabel;
+        internal string SaveId;
+    }
+
+    private sealed class FadeBinding
+    {
+        internal string StateKey;
+        internal string Label;
+        internal string WidgetId;
+    }
+
+    private static readonly Dictionary<string, string> SettingWidgetIds = new(StringComparer.Ordinal);
+    private static readonly Dictionary<string, string> InheritanceWidgetIds = new(StringComparer.Ordinal);
+
+    private static Section section = Section.Environment;
+    private static string effectSearch = string.Empty;
+    private static string observedEffectSearch;
+    private static string normalizedEffectSearch = string.Empty;
+    private static bool effectsExpanded = true;
+    private const float BrowserBodyFontScale = 1.22f;
+
+    private static string[] projectedAvailableEffects;
+    private static string[] projectedEffectCategories;
+    private static string projectedEffectSearch = string.Empty;
+    private static readonly List<EffectBrowserRow> effectBrowserRows = new();
+
+    private static EditorRoomEffectSnapshot[] projectedEffects;
+    private static bool projectedEffectsChinese;
+    private static EffectBinding[] effectBindings = Array.Empty<EffectBinding>();
+
+    private static string[] projectedTemplateNames;
+    private static string projectedTemplateRegion = string.Empty;
+    private static bool projectedTemplateChinese;
+    private static TemplateBinding[] templateBindings = Array.Empty<TemplateBinding>();
+    private static string templatePreviewRegion = string.Empty;
+    private static string templatePreviewName = string.Empty;
+    private static string templatePreview = string.Empty;
+
+    private static int projectedFadeCount = -1;
+    private static bool projectedFadeChinese;
+    private static FadeBinding[] fadeBindings = Array.Empty<FadeBinding>();
+    private static int projectedTerrainFadeCount = -1;
+    private static bool projectedTerrainFadeChinese;
+    private static FadeBinding[] terrainFadeBindings = Array.Empty<FadeBinding>();
+
+    internal static void ResetRetainedState()
+    {
+        SettingWidgetIds.Clear();
+        InheritanceWidgetIds.Clear();
+
+        projectedAvailableEffects = null;
+        projectedEffectCategories = null;
+        projectedEffectSearch = string.Empty;
+        effectBrowserRows.Clear();
+        observedEffectSearch = null;
+        normalizedEffectSearch = string.Empty;
+
+        projectedEffects = null;
+        projectedEffectsChinese = false;
+        effectBindings = Array.Empty<EffectBinding>();
+
+        projectedTemplateNames = null;
+        projectedTemplateRegion = string.Empty;
+        projectedTemplateChinese = false;
+        templateBindings = Array.Empty<TemplateBinding>();
+        templatePreviewRegion = string.Empty;
+        templatePreviewName = string.Empty;
+        templatePreview = string.Empty;
+
+        projectedFadeCount = -1;
+        projectedFadeChinese = false;
+        fadeBindings = Array.Empty<FadeBinding>();
+        projectedTerrainFadeCount = -1;
+        projectedTerrainFadeChinese = false;
+        terrainFadeBindings = Array.Empty<FadeBinding>();
+    }
+
+    internal static void DrawBrowser(EditorRoomSettingsSnapshot snapshot)
+    {
+        DevToolWidgets.PaneTitle(DevToolUiSettings.T("房间设置", "ROOM SETTINGS"), BrowserBodyFontScale);
+
+        DrawSectionButton(Section.Environment, DevToolUiSettings.T("环境", "Environment"), "RoomSectionEnvironment");
+        DrawSectionButton(Section.Palette, DevToolUiSettings.T("色板", "Palette"), "RoomSectionPalette");
+        DrawSectionButton(Section.Gameplay, DevToolUiSettings.T("玩法", "Gameplay"), "RoomSectionGameplay");
+        DrawSectionButton(Section.Terrain, DevToolUiSettings.T("地形", "Terrain"), "RoomSectionTerrain");
+        DrawSectionButton(Section.Templates, DevToolUiSettings.T("模板", "Templates"), "RoomSectionTemplates");
+        DrawSectionButton(Section.Effects, DevToolUiSettings.T("效果", "Effects"), "RoomSectionEffects");
+
+        if (section != Section.Effects || !snapshot.Available)
+        {
+            return;
+        }
+
+        DevToolWidgets.SectionHeader(DevToolUiSettings.T("添加效果", "ADD EFFECT"), BrowserBodyFontScale);
+        DevToolWidgets.MutedText(DevToolUiSettings.T("搜索", "SEARCH"));
+        ImGui.SetNextItemWidth(-1f);
+        ImGui.InputText("##RoomEffectSearch", ref effectSearch, 128);
+        ImGui.Spacing();
+
+        EnsureEffectBrowserProjection(snapshot);
+        string lastCategory = null;
+        for (int i = 0; i < effectBrowserRows.Count; i++)
+        {
+            EffectBrowserRow row = effectBrowserRows[i];
+            if (!string.Equals(lastCategory, row.Category, StringComparison.Ordinal))
+            {
+                lastCategory = row.Category;
+                if (!string.IsNullOrEmpty(row.Category))
+                    DevToolWidgets.SourceHeader(row.Category, row.SourceColor, 1.52f, BrowserBodyFontScale);
+            }
+
+            bool clicked = ImGui.Selectable(row.Label, false);
+            if (clicked)
+            {
+                RoomEditorCommandQueue.Enqueue(new RoomEditorCommand(
+                    RoomEditorCommandKind.AddEffect,
+                    key: row.Type));
+            }
+
+        }
+
+
+        if (effectBrowserRows.Count == 0)
+            DevToolWidgets.MutedText(DevToolUiSettings.T("没有匹配的效果。", "No matching effects."));
+    }
+
+    internal static void DrawInspector(EditorRoomSettingsSnapshot snapshot)
+    {
+        if (!snapshot.Available)
+        {
+            DevToolWidgets.MutedText(DevToolUiSettings.T("房间设置不可用。", "Room settings unavailable."), true);
+            return;
+        }
+
+        bool switchAllEffects = false;
+        if (section == Section.Effects)
+        {
+            switchAllEffects = DevToolWidgets.PaneTitleWithAction(
+                SectionName(section),
+                DevToolUiSettings.T("切换", "Switch"),
+                "RoomEffectsSwitchAll");
+            if (switchAllEffects)
+                effectsExpanded = !effectsExpanded;
+        }
+        else
+        {
+            DevToolWidgets.PaneTitle(SectionName(section));
+        }
+
+        switch (section)
+        {
+            case Section.Environment:
+                DrawEnvironment(snapshot);
+                break;
+            case Section.Palette:
+                DrawPalette(snapshot);
+                break;
+            case Section.Gameplay:
+                DrawGameplay(snapshot);
+                break;
+            case Section.Terrain:
+                DrawTerrain(snapshot);
+                break;
+            case Section.Templates:
+                DrawTemplates(snapshot);
+                break;
+            case Section.Effects:
+                DrawEffects(snapshot, switchAllEffects);
+                break;
+        }
+    }
+
+    private static void DrawEnvironment(EditorRoomSettingsSnapshot snapshot)
+    {
+        DevToolWidgets.SectionHeader(DevToolUiSettings.T("雨", "RAIN"));
+        DrawFloatInherited(snapshot, RoomSettingKeys.RainIntensity, DevToolUiSettings.T("降雨强度", "Rain Intensity"), snapshot.RainIntensity, 0f, 1f);
+        DrawFloatInherited(snapshot, RoomSettingKeys.RumbleIntensity, DevToolUiSettings.T("震动强度", "Rumble Intensity"), snapshot.RumbleIntensity, 0f, 1f);
+        DrawFloatInherited(snapshot, RoomSettingKeys.CeilingDrips, DevToolUiSettings.T("天花板滴水", "Ceiling Drips"), snapshot.CeilingDrips, 0f, 1f);
+
+        DevToolWidgets.SectionHeader(DevToolUiSettings.T("水面波浪", "WATER WAVES"));
+        DrawFloatInherited(snapshot, RoomSettingKeys.WaveSpeed, DevToolUiSettings.T("波速", "Wave Speed"), snapshot.WaveSpeed, 0f, 1f);
+        DrawFloatInherited(snapshot, RoomSettingKeys.WaveLength, DevToolUiSettings.T("波长", "Wave Length"), snapshot.WaveLength, 0f, 1f);
+        DrawFloatInherited(snapshot, RoomSettingKeys.WaveAmplitude, DevToolUiSettings.T("波幅", "Wave Amplitude"), snapshot.WaveAmplitude, 0f, 1f);
+        DrawFloatInherited(snapshot, RoomSettingKeys.SecondWaveLength, DevToolUiSettings.T("回卷长度", "Rollback Length"), snapshot.SecondWaveLength, 0f, 1f);
+        DrawFloatInherited(snapshot, RoomSettingKeys.SecondWaveAmplitude, DevToolUiSettings.T("回卷幅度", "Rollback Amplitude"), snapshot.SecondWaveAmplitude, 0f, 1f);
+        DrawFloatInherited(snapshot, RoomSettingKeys.WaterReflectionAlpha, DevToolUiSettings.T("水面亮度", "Water Light"), snapshot.WaterReflectionAlpha, 0f, 1f);
+
+        DevToolWidgets.SectionHeader(DevToolUiSettings.T("氛围", "ATMOSPHERE"));
+        DrawFloatInherited(snapshot, RoomSettingKeys.Clouds, DevToolUiSettings.T("云层", "Clouds"), snapshot.Clouds, 0f, 1f);
+        DrawFloatInherited(snapshot, RoomSettingKeys.Grime, DevToolUiSettings.T("污垢", "Grime"), snapshot.Grime, 0f, 1f);
+    }
+
+    private static void DrawPalette(EditorRoomSettingsSnapshot snapshot)
+    {
+        DevToolWidgets.SectionHeader(DevToolUiSettings.T("主色板", "PALETTE"));
+        DrawIntInherited(snapshot, RoomSettingKeys.Palette, DevToolUiSettings.T("色板", "Palette"), snapshot.Palette);
+        DrawIntInherited(snapshot, RoomSettingKeys.EffectColorA, DevToolUiSettings.T("效果颜色 A", "Effect Color A"), snapshot.EffectColorA);
+        DrawIntInherited(snapshot, RoomSettingKeys.EffectColorB, DevToolUiSettings.T("效果颜色 B", "Effect Color B"), snapshot.EffectColorB);
+
+        DevToolWidgets.SectionHeader(DevToolUiSettings.T("渐变色板", "FADE PALETTE"));
+        int fadeAuthoritative = snapshot.HasFadePalette ? snapshot.FadePalette : -1;
+        BeginSettingRow(DevToolUiSettings.T("渐变色板编号", "Fade Palette"), 0f, out _);
+        DevToolNumericEditResult<int> fadeEdit = DevToolNumericWidgets.InputInt(
+            DevToolNumericScope.Room,
+            RoomSettingKeys.FadePalette,
+            "##RoomFadePalette",
+            fadeAuthoritative,
+            1,
+            10);
+        if (fadeEdit.Committed)
+            SendSetting(RoomSettingKeys.FadePalette, new EditorPropertyValue(EditorPropertyKind.Integer, integer: fadeEdit.Value));
+
+        if (snapshot.HasFadePalette)
+            DrawScreenFades(snapshot.FadePaletteFades, false);
+        else
+            DevToolWidgets.MutedText(DevToolUiSettings.T("-1 / 负数表示不使用渐变色板。", "-1 / negative disables the fade palette."), true);
+    }
+
+    private static void DrawGameplay(EditorRoomSettingsSnapshot snapshot)
+    {
+        DevToolWidgets.SectionHeader(DevToolUiSettings.T("危险", "DANGER"));
+        float dangerTrailingWidth = InheritanceControlWidth(snapshot, RoomSettingKeys.DangerType);
+        BeginSettingRow(DevToolUiSettings.T("危险类型", "Danger Type"), dangerTrailingWidth, out float dangerTrailingX);
+        if (ImGui.BeginCombo("##RoomDangerType", snapshot.DangerType))
+        {
+            string[] options = snapshot.DangerTypes ?? Array.Empty<string>();
+            int chosen = DevToolChoiceList.DrawAll(options, Array.IndexOf(options, snapshot.DangerType));
+            if (chosen >= 0) SendSetting(RoomSettingKeys.DangerType, new EditorPropertyValue(EditorPropertyKind.String, text: options[chosen]));
+            ImGui.EndCombo();
+        }
+        DrawInheritanceControl(snapshot, RoomSettingKeys.DangerType, dangerTrailingX);
+
+        bool script = snapshot.RoomSpecificScript;
+        DrawCheckboxRow(DevToolUiSettings.T("房间专属脚本", "Room Specific Script"), "##RoomSpecificScript", ref script);
+        if (ImGui.IsItemEdited())
+            SendSetting(RoomSettingKeys.RoomSpecificScript,
+                new EditorPropertyValue(EditorPropertyKind.Boolean, boolean: script));
+
+        bool wetTerrain = snapshot.WetTerrain;
+        DrawCheckboxRow(DevToolUiSettings.T("湿润地形", "Wet Terrain"), "##RoomWetTerrain", ref wetTerrain);
+        if (ImGui.IsItemEdited())
+            SendSetting(RoomSettingKeys.WetTerrain,
+                new EditorPropertyValue(EditorPropertyKind.Boolean, boolean: wetTerrain));
+
+        DevToolWidgets.SectionHeader(DevToolUiSettings.T("随机物品", "RANDOM ITEMS"));
+        DrawFloatInherited(snapshot, RoomSettingKeys.RandomItemDensity, DevToolUiSettings.T("物品密度", "Item Density"), snapshot.RandomItemDensity, 0f, 1f);
+        DrawFloatInherited(snapshot, RoomSettingKeys.RandomItemSpearChance, DevToolUiSettings.T("长矛概率", "Spear Chance"), snapshot.RandomItemSpearChance, 0f, 1f);
+    }
+
+    private static void DrawTerrain(EditorRoomSettingsSnapshot snapshot)
+    {
+        if (!snapshot.TerrainAvailable)
+        {
+            DevToolWidgets.MutedText(DevToolUiSettings.T(
+                "当前房间没有 TerrainCurve；原版 Terrain 面板默认折叠，但参数仍可写入 RoomSettings。",
+                "This room has no TerrainCurve; vanilla collapses the Terrain panel, but the RoomSettings values remain editable."), true);
+        }
+
+        DevToolWidgets.SectionHeader(DevToolUiSettings.T("地形色板", "TERRAIN PALETTE"));
+        DrawTerrainPalette(snapshot, false);
+        DrawTerrainPalette(snapshot, true);
+
+        if (snapshot.HasTerrainFadePalette)
+            DrawScreenFades(snapshot.TerrainFadePaletteFades, true);
+
+        DevToolWidgets.SectionHeader(DevToolUiSettings.T("地形参数", "TERRAIN PARAMETERS"));
+        DrawFloatInherited(snapshot, RoomSettingKeys.TerrainLight, DevToolUiSettings.T("光照", "Light"), snapshot.TerrainLight, 0f, 1f);
+        DrawFloatInherited(snapshot, RoomSettingKeys.TerrainStainAmount, DevToolUiSettings.T("污渍量", "Stain Amount"), snapshot.TerrainStainAmount, 0f, 1f);
+        DrawFloatInherited(snapshot, RoomSettingKeys.TerrainStainBrightness, DevToolUiSettings.T("污渍亮度", "Stain Brightness"), snapshot.TerrainStainBrightness, 0f, 1f);
+        DrawFloatInherited(snapshot, RoomSettingKeys.TerrainStainHeight, DevToolUiSettings.T("污渍高度", "Stain Height"), snapshot.TerrainStainHeight, 0f, 1f);
+        DrawFloatInherited(snapshot, RoomSettingKeys.TerrainGooHeight, DevToolUiSettings.T("Goo 高度", "Goo Height"), snapshot.TerrainGooHeight, 0f, 1f);
+        DrawFloatInherited(snapshot, RoomSettingKeys.TerrainWaves, DevToolUiSettings.T("波浪", "Waves"), snapshot.TerrainWaves, 0f, 1f);
+        DrawFloatInherited(snapshot, RoomSettingKeys.TerrainEdgeRadius, DevToolUiSettings.T("边缘半径", "Edge Radius"), snapshot.TerrainEdgeRadius, 0f, TerrainCurve.edgeRadiusSliderMax);
+        DrawFloatInherited(snapshot, RoomSettingKeys.TerrainGrain, DevToolUiSettings.T("颗粒", "Grain"), snapshot.TerrainGrain, 0f, 1f);
+        DrawFloatInherited(snapshot, RoomSettingKeys.TerrainDepth, DevToolUiSettings.T("深度", "Depth"), snapshot.TerrainDepth, TerrainCurve.depthSliderMin, TerrainCurve.depthSliderMax);
+        DrawFloatInherited(snapshot, RoomSettingKeys.TerrainSkyFade, DevToolUiSettings.T("天空淡出", "Sky Fade"), snapshot.TerrainSkyFade, 0f, 1f);
+    }
+
+    private static void DrawTerrainPalette(EditorRoomSettingsSnapshot snapshot, bool fade)
+    {
+        string current = fade
+            ? (snapshot.HasTerrainFadePalette ? snapshot.TerrainFadePalette : "NO PALETTE")
+            : snapshot.TerrainPalette;
+        string visibleLabel = fade
+            ? DevToolUiSettings.T("地形渐变色板", "Terrain Fade Palette")
+            : DevToolUiSettings.T("地形色板", "Terrain Palette");
+        string id = fade ? "##TerrainFadePalette" : "##TerrainPalette";
+        float trailingWidth = fade ? 0f : InheritanceControlWidth(snapshot, RoomSettingKeys.TerrainPalette);
+        BeginSettingRow(visibleLabel, trailingWidth, out float trailingX);
+
+        if (ImGui.BeginCombo(id, string.IsNullOrEmpty(current) ? "NO PALETTE" : current))
+        {
+            if (fade && ImGui.Selectable("NO PALETTE##TerrainFadeNone", !snapshot.HasTerrainFadePalette))
+                SendSetting(RoomSettingKeys.TerrainFadePalette,
+                    new EditorPropertyValue(EditorPropertyKind.String, text: "NO PALETTE"));
+
+            string[] palettes = snapshot.TerrainPalettes ?? Array.Empty<string>();
+            int selected = -1;
+            for (int i = 0; i < palettes.Length; i++)
+                if (string.Equals(current, palettes[i], StringComparison.OrdinalIgnoreCase)) { selected = i; break; }
+            int chosen = DevToolChoiceList.DrawAll(palettes, selected);
+            if (chosen >= 0) SendSetting(fade ? RoomSettingKeys.TerrainFadePalette : RoomSettingKeys.TerrainPalette,
+                new EditorPropertyValue(EditorPropertyKind.String, text: palettes[chosen]));
+            ImGui.EndCombo();
+        }
+
+        if (!fade) DrawInheritanceControl(snapshot, RoomSettingKeys.TerrainPalette, trailingX);
+    }
+
+    private static void DrawTemplates(EditorRoomSettingsSnapshot snapshot)
+    {
+        if (!snapshot.TemplateControlsAvailable)
+        {
+            DevToolWidgets.MutedText(DevToolUiSettings.T("当前房间没有区域模板可用。", "No region templates are available for this room."), true);
+            return;
+        }
+
+        EnsureTemplateBindings(snapshot);
+        DevToolWidgets.SectionHeader(DevToolUiSettings.T("继承自模板", "INHERIT FROM TEMPLATE"));
+        string preview = GetTemplatePreview(snapshot);
+
+        BeginSettingRow(DevToolUiSettings.T("当前模板", "Current Template"), 0f, out _);
+        if (ImGui.BeginCombo("##RoomTemplate", preview))
+        {
+            bool none = string.Equals(snapshot.CurrentTemplate, "NONE", StringComparison.OrdinalIgnoreCase);
+            if (ImGui.Selectable("NONE##RoomTemplateNone", none))
+                RoomEditorCommandQueue.Enqueue(new RoomEditorCommand(RoomEditorCommandKind.SetTemplate, key: "NONE"));
+            if (none) ImGui.SetItemDefaultFocus();
+
+            for (int i = 0; i < templateBindings.Length; i++)
+            {
+                TemplateBinding binding = templateBindings[i];
+                bool selected = string.Equals(snapshot.CurrentTemplate, binding.Name, StringComparison.OrdinalIgnoreCase);
+                if (ImGui.Selectable(binding.ComboLabel, selected))
+                    RoomEditorCommandQueue.Enqueue(new RoomEditorCommand(RoomEditorCommandKind.SetTemplate, key: binding.Name));
+                if (selected) ImGui.SetItemDefaultFocus();
+            }
+            ImGui.EndCombo();
+        }
+
+        DevToolWidgets.SectionHeader(DevToolUiSettings.T("保存为模板", "SAVE AS TEMPLATE"));
+        DevToolWidgets.MutedText(DevToolUiSettings.T(
+            "与原版一致：点击后会立即覆盖对应区域模板文件，并重置当前房间的本地 RoomSettings。",
+            "Vanilla behavior: clicking immediately overwrites the selected region template file and resets the room's local RoomSettings."), true);
+
+        for (int i = 0; i < templateBindings.Length; i++)
+        {
+            TemplateBinding binding = templateBindings[i];
+            if (DevToolWidgets.ActionButton(
+                    binding.SaveLabel,
+                    binding.SaveId,
+                    DevToolButtonTone.Primary,
+                    true))
+            {
+                RoomEditorCommandQueue.Enqueue(new RoomEditorCommand(RoomEditorCommandKind.SaveAsTemplate, key: binding.Name));
+            }
+        }
+    }
+
+    private static void DrawEffects(EditorRoomSettingsSnapshot snapshot, bool switchAll)
+    {
+        EditorRoomEffectSnapshot[] effects = snapshot.Effects ?? Array.Empty<EditorRoomEffectSnapshot>();
+        if (effects.Length == 0)
+        {
+            DevToolWidgets.MutedText(DevToolUiSettings.T("当前没有房间效果，可从左侧浏览器添加。", "No room effects. Add one from the Browser."), true);
+            return;
+        }
+
+        EnsureEffectBindings(effects);
+        for (int i = 0; i < effectBindings.Length; i++)
+        {
+            EffectBinding binding = effectBindings[i];
+            EditorRoomEffectSnapshot effect = binding.Effect;
+            if (switchAll)
+                ImGui.SetNextItemOpen(effectsExpanded, ImGuiCond.Always);
+            ImGui.PushStyleColor(ImGuiCol.Header, new Num.Vector4(0.18f, 0.34f, 0.54f, 0.72f));
+            ImGui.PushStyleColor(ImGuiCol.HeaderHovered, new Num.Vector4(0.24f, 0.45f, 0.72f, 0.88f));
+            ImGui.PushStyleColor(ImGuiCol.HeaderActive, new Num.Vector4(0.30f, 0.56f, 0.90f, 0.95f));
+            bool open = ImGui.CollapsingHeader(binding.Header, ImGuiTreeNodeFlags.DefaultOpen);
+            ImGui.PopStyleColor(3);
+            if (!open) continue;
+
+            float[] values = effect.Values ?? Array.Empty<float>();
+            int count = Math.Min(binding.Sliders.Length, values.Length);
+            for (int slider = 0; slider < count; slider++)
+            {
+                EffectSliderBinding sliderBinding = binding.Sliders[slider];
+                BeginSettingRow(sliderBinding.DisplayName, 0f, out _);
+                if (effect.Inherited)
+                {
+                    DevToolNumericWidgets.Discard(DevToolNumericScope.Room, sliderBinding.StateKey, effect.Index);
+                }
+                else
+                {
+                    DevToolNumericEditResult<float> edit = DevToolNumericWidgets.SliderFloat(
+                        DevToolNumericScope.Room,
+                        sliderBinding.StateKey,
+                        sliderBinding.WidgetId,
+                        values[slider],
+                        0f,
+                        1f,
+                        instance: effect.Index);
+                    if (edit.Committed)
+                    {
+                        RoomEditorCommandQueue.Enqueue(new RoomEditorCommand(
+                            RoomEditorCommandKind.SetEffectAmount,
+                            index: effect.Index,
+                            secondaryIndex: slider,
+                            value: new EditorPropertyValue(EditorPropertyKind.Float, x: edit.Value)));
+                    }
+                }
+            }
+
+            if (effect.Inherited)
+            {
+                DevToolWidgets.MutedText(DevToolUiSettings.T("继承效果 | 请修改来源模板。", "Inherited effect | edit the source template to change it."), true);
+            }
+            else if (DevToolWidgets.ActionButton(
+                         DevToolUiSettings.T("移除", "Remove"),
+                         binding.RemoveId,
+                         DevToolButtonTone.Danger))
+            {
+                RoomEditorCommandQueue.Enqueue(new RoomEditorCommand(
+                    RoomEditorCommandKind.DeleteEffect,
+                    index: effect.Index));
+            }
+
+            ImGui.Spacing();
+        }
+    }
+
+    private static void DrawScreenFades(float[] fades, bool terrain)
+    {
+        fades ??= Array.Empty<float>();
+        FadeBinding[] bindings = EnsureFadeBindings(fades.Length, terrain);
+        for (int i = 0; i < fades.Length; i++)
+        {
+            FadeBinding binding = bindings[i];
+            BeginSettingRow(binding.Label, 0f, out _);
+            DevToolNumericEditResult<float> edit = DevToolNumericWidgets.SliderFloat(
+                DevToolNumericScope.Room,
+                binding.StateKey,
+                binding.WidgetId,
+                fades[i],
+                0f,
+                1f);
+            if (edit.Committed)
+            {
+                RoomEditorCommandQueue.Enqueue(new RoomEditorCommand(
+                    terrain ? RoomEditorCommandKind.SetTerrainPaletteFade : RoomEditorCommandKind.SetPaletteFade,
+                    index: i,
+                    value: new EditorPropertyValue(EditorPropertyKind.Float, x: edit.Value)));
+            }
+        }
+    }
+
+    private static void EnsureEffectBrowserProjection(EditorRoomSettingsSnapshot snapshot)
+    {
+        string[] available = snapshot.AvailableEffects ?? Array.Empty<string>();
+        string[] categories = snapshot.AvailableEffectCategories ?? Array.Empty<string>();
+        string normalizedSearch = EffectSearchQuery();
+        if (ReferenceEquals(projectedAvailableEffects, available) &&
+            ReferenceEquals(projectedEffectCategories, categories) &&
+            string.Equals(projectedEffectSearch, normalizedSearch, StringComparison.Ordinal))
+            return;
+
+        effectBrowserRows.Clear();
+        for (int i = 0; i < available.Length; i++)
+        {
+            string type = available[i] ?? string.Empty;
+            if (!Matches(type, normalizedSearch)) continue;
+            string category = i < categories.Length ? categories[i] ?? string.Empty : string.Empty;
+            effectBrowserRows.Add(new EffectBrowserRow
+            {
+                Type = type,
+                Category = category,
+                Label = type + "##RoomAddEffect" + type,
+                SourceColor = string.IsNullOrEmpty(category)
+                    ? new Num.Vector4(0.78f, 0.72f, 1f, 1f)
+                    : EffectSourceColor(category)
+            });
+        }
+
+        projectedAvailableEffects = available;
+        projectedEffectCategories = categories;
+        projectedEffectSearch = normalizedSearch;
+    }
+
+    private static string EffectSearchQuery()
+    {
+        if (string.Equals(observedEffectSearch, effectSearch, StringComparison.Ordinal))
+            return normalizedEffectSearch;
+        observedEffectSearch = effectSearch;
+        normalizedEffectSearch = effectSearch?.Trim() ?? string.Empty;
+        return normalizedEffectSearch;
+    }
+
+    private static void EnsureEffectBindings(EditorRoomEffectSnapshot[] effects)
+    {
+        bool chinese = DevToolUiSettings.IsChinese;
+        if (ReferenceEquals(projectedEffects, effects) && projectedEffectsChinese == chinese) return;
+
+        EffectBinding[] next = new EffectBinding[effects.Length];
+        for (int i = 0; i < effects.Length; i++)
+        {
+            EditorRoomEffectSnapshot effect = effects[i];
+            string header = effect?.Type ?? string.Empty;
+            if (!string.IsNullOrEmpty(effect?.Category)) header += "  |  " + effect.Category;
+            if (effect?.Inherited == true) header += DevToolUiSettings.T("  [继承]", "  [Inherited]");
+            else if (effect?.OverWrite == true) header += DevToolUiSettings.T("  [覆盖模板]", "  [Overrides template]");
+            header += "##RoomEffect" + (effect?.Index ?? i);
+
+            string[] names = effect?.SliderNames ?? Array.Empty<string>();
+            float[] values = effect?.Values ?? Array.Empty<float>();
+            int count = Math.Min(names.Length, values.Length);
+            EffectSliderBinding[] sliders = new EffectSliderBinding[count];
+            for (int slider = 0; slider < count; slider++)
+            {
+                string stateKey = "effect:" + effect.Index + ":" + slider;
+                sliders[slider] = new EffectSliderBinding
+                {
+                    StateKey = stateKey,
+                    WidgetId = "##" + stateKey,
+                    DisplayName = string.IsNullOrEmpty(names[slider])
+                        ? DevToolUiSettings.T("数值 ", "Value ") + (slider + 1)
+                        : names[slider]
+                };
+            }
+
+            next[i] = new EffectBinding
+            {
+                Effect = effect,
+                Header = header,
+                RemoveId = "RoomEffectRemove" + (effect?.Index ?? i),
+                Sliders = sliders
+            };
+        }
+
+        projectedEffects = effects;
+        projectedEffectsChinese = chinese;
+        effectBindings = next;
+    }
+
+    private static void EnsureTemplateBindings(EditorRoomSettingsSnapshot snapshot)
+    {
+        string[] names = snapshot.TemplateNames ?? Array.Empty<string>();
+        string region = snapshot.RegionName ?? string.Empty;
+        bool chinese = DevToolUiSettings.IsChinese;
+        if (ReferenceEquals(projectedTemplateNames, names) &&
+            string.Equals(projectedTemplateRegion, region, StringComparison.Ordinal) &&
+            projectedTemplateChinese == chinese)
+            return;
+
+        TemplateBinding[] next = new TemplateBinding[names.Length];
+        string savePrefix = DevToolUiSettings.T("写入 ", "Save to ");
+        for (int i = 0; i < names.Length; i++)
+        {
+            string name = names[i] ?? string.Empty;
+            next[i] = new TemplateBinding
+            {
+                Name = name,
+                ComboLabel = region + " - " + name + "##RoomTemplate" + i,
+                SaveLabel = savePrefix + region + " - " + name,
+                SaveId = "SaveRoomTemplate" + i
+            };
+        }
+
+        projectedTemplateNames = names;
+        projectedTemplateRegion = region;
+        projectedTemplateChinese = chinese;
+        templateBindings = next;
+        templatePreviewRegion = string.Empty;
+        templatePreviewName = string.Empty;
+    }
+
+    private static string GetTemplatePreview(EditorRoomSettingsSnapshot snapshot)
+    {
+        string current = snapshot.CurrentTemplate ?? string.Empty;
+        if (string.Equals(current, "NONE", StringComparison.OrdinalIgnoreCase)) return "NONE";
+        string region = snapshot.RegionName ?? string.Empty;
+        if (string.Equals(templatePreviewRegion, region, StringComparison.Ordinal) &&
+            string.Equals(templatePreviewName, current, StringComparison.Ordinal))
+            return templatePreview;
+
+        templatePreviewRegion = region;
+        templatePreviewName = current;
+        templatePreview = region + " - " + current;
+        return templatePreview;
+    }
+
+    private static FadeBinding[] EnsureFadeBindings(int count, bool terrain)
+    {
+        bool chinese = DevToolUiSettings.IsChinese;
+        if (terrain)
+        {
+            if (projectedTerrainFadeCount == count && projectedTerrainFadeChinese == chinese)
+                return terrainFadeBindings;
+            terrainFadeBindings = BuildFadeBindings(count, true);
+            projectedTerrainFadeCount = count;
+            projectedTerrainFadeChinese = chinese;
+            return terrainFadeBindings;
+        }
+
+        if (projectedFadeCount == count && projectedFadeChinese == chinese)
+            return fadeBindings;
+        fadeBindings = BuildFadeBindings(count, false);
+        projectedFadeCount = count;
+        projectedFadeChinese = chinese;
+        return fadeBindings;
+    }
+
+    private static FadeBinding[] BuildFadeBindings(int count, bool terrain)
+    {
+        FadeBinding[] result = new FadeBinding[count];
+        string prefix = DevToolUiSettings.T("屏幕 ", "Screen ");
+        for (int i = 0; i < count; i++)
+        {
+            string stateKey = (terrain ? "terrainFade:" : "fade:") + i;
+            result[i] = new FadeBinding
+            {
+                StateKey = stateKey,
+                Label = prefix + i,
+                WidgetId = "##" + stateKey
+            };
+        }
+        return result;
+    }
+
+    private static Num.Vector4 EffectSourceColor(string category)
+    {
+        if (category.IndexOf("DryCycle", StringComparison.OrdinalIgnoreCase) >= 0)
+            return new Num.Vector4(0.36f, 0.72f, 1f, 1f);
+
+        if (category.IndexOf("RegionKit", StringComparison.OrdinalIgnoreCase) >= 0 ||
+            category.StartsWith("RK", StringComparison.OrdinalIgnoreCase))
+            return new Num.Vector4(1f, 0.70f, 0.34f, 1f);
+
+        if (category.IndexOf("Vanilla", StringComparison.OrdinalIgnoreCase) >= 0)
+            return new Num.Vector4(0.88f, 0.88f, 0.88f, 1f);
+
+        return new Num.Vector4(0.78f, 0.72f, 1f, 1f);
+    }
+
+    private static string SectionName(Section value)
+    {
+        return value switch
+        {
+            Section.Environment => DevToolUiSettings.T("环境", "Environment"),
+            Section.Palette => DevToolUiSettings.T("色板", "Palette"),
+            Section.Gameplay => DevToolUiSettings.T("玩法", "Gameplay"),
+            Section.Terrain => DevToolUiSettings.T("地形", "Terrain"),
+            Section.Templates => DevToolUiSettings.T("模板", "Templates"),
+            Section.Effects => DevToolUiSettings.T("效果", "Effects"),
+            _ => string.Empty
+        };
+    }
+
+    private static void DrawSectionButton(Section value, string label, string id)
+    {
+        bool active = section == value;
+        if (DevToolWidgets.NavItem(label, id, active))
+            section = value;
+    }
+
+    private static void DrawFloatInherited(
+        EditorRoomSettingsSnapshot snapshot,
+        string key,
+        string label,
+        float current,
+        float min,
+        float max)
+    {
+        float trailingWidth = InheritanceControlWidth(snapshot, key);
+        BeginSettingRow(label, trailingWidth, out float trailingX);
+        DrawFloat(key, current, min, max);
+        DrawInheritanceControl(snapshot, key, trailingX);
+    }
+
+    private static void DrawIntInherited(
+        EditorRoomSettingsSnapshot snapshot,
+        string key,
+        string label,
+        int current)
+    {
+        float trailingWidth = InheritanceControlWidth(snapshot, key);
+        BeginSettingRow(label, trailingWidth, out float trailingX);
+        DrawInt(key, current);
+        DrawInheritanceControl(snapshot, key, trailingX);
+    }
+
+    private static void BeginSettingRow(string label, float trailingWidth, out float trailingX)
+    {
+        float startX = ImGui.GetCursorPosX();
+        float available = ImGui.GetContentRegionAvail().X;
+        ImGuiStylePtr style = ImGui.GetStyle();
+        float gap = Math.Max(6f, style.ItemSpacing.X);
+
+        // Never place the control on top of a long label. The previous fixed 30% label column
+        // could be narrower than strings such as "Terrain Fade Palette", so SameLine(controlX)
+        // moved the combo back underneath the rendered text.
+        float textWidth = ImGui.CalcTextSize(label ?? string.Empty).X;
+        float labelWidth = Math.Max(
+            118f,
+            Math.Min(
+                300f,
+                Math.Max(available * 0.30f, textWidth + gap * 1.5f)));
+
+        trailingX = startX + Math.Max(0f, available - trailingWidth);
+        float controlX = startX + labelWidth;
+        float controlWidth = Math.Max(72f, trailingX - gap - controlX);
+
+        ImGui.AlignTextToFramePadding();
+        ImGui.TextUnformatted(label);
+        ImGui.SameLine(controlX);
+        ImGui.SetNextItemWidth(controlWidth);
+    }
+
+    private static void DrawCheckboxRow(string label, string id, ref bool value)
+    {
+        float startX = ImGui.GetCursorPosX();
+        float available = ImGui.GetContentRegionAvail().X;
+        float gap = Math.Max(6f, ImGui.GetStyle().ItemSpacing.X);
+        float textWidth = ImGui.CalcTextSize(label ?? string.Empty).X;
+        float labelWidth = Math.Max(
+            118f,
+            Math.Min(
+                300f,
+                Math.Max(available * 0.30f, textWidth + gap * 1.5f)));
+        ImGui.AlignTextToFramePadding();
+        ImGui.TextUnformatted(label);
+        ImGui.SameLine(startX + labelWidth);
+        ImGui.Checkbox(id, ref value);
+    }
+
+    private static float InheritanceControlWidth(EditorRoomSettingsSnapshot snapshot, string key)
+    {
+        string text = snapshot.IsLocal(key)
+            ? DevToolUiSettings.T("继承", "Inherit")
+            : snapshot.InheritedFromTemplate(key) ? "<T>" : "<A>";
+        ImGuiStylePtr style = ImGui.GetStyle();
+        float padding = snapshot.IsLocal(key) ? style.FramePadding.X * 2f : 0f;
+        return ImGui.CalcTextSize(text).X + padding + 8f;
+    }
+
+    private static void DrawInheritanceControl(EditorRoomSettingsSnapshot snapshot, string key, float trailingX)
+    {
+        ImGui.SameLine(trailingX);
+        if (snapshot.IsLocal(key))
+        {
+            if (DevToolWidgets.ActionButton(
+                    DevToolUiSettings.T("继承", "Inherit"),
+                    CachedId(InheritanceWidgetIds, key, "RoomInherit"),
+                    DevToolButtonTone.Subtle))
+            {
+                RoomEditorCommandQueue.Enqueue(new RoomEditorCommand(RoomEditorCommandKind.ResetSetting, key: key));
+            }
+        }
+        else
+        {
+            DevToolWidgets.MutedText(snapshot.InheritedFromTemplate(key) ? "<T>" : "<A>");
+        }
+    }
+
+    private static void DrawFloat(string key, float current, float min, float max)
+    {
+        DevToolNumericEditResult<float> edit = DevToolNumericWidgets.SliderFloat(
+            DevToolNumericScope.Room,
+            key,
+            CachedId(SettingWidgetIds, key, "##RoomSetting"),
+            current,
+            min,
+            max);
+        if (edit.Committed)
+            SendSetting(key, new EditorPropertyValue(EditorPropertyKind.Float, x: edit.Value));
+    }
+
+    private static void DrawInt(string key, int current)
+    {
+        DevToolNumericEditResult<int> edit = DevToolNumericWidgets.InputInt(
+            DevToolNumericScope.Room,
+            key,
+            CachedId(SettingWidgetIds, key, "##RoomSetting"),
+            current,
+            1,
+            10);
+        if (edit.Committed)
+            SendSetting(key, new EditorPropertyValue(EditorPropertyKind.Integer, integer: edit.Value));
+    }
+
+    private static void SendSetting(string key, EditorPropertyValue value)
+    {
+        RoomEditorCommandQueue.Enqueue(new RoomEditorCommand(
+            RoomEditorCommandKind.SetSetting,
+            key: key,
+            value: value));
+    }
+
+    private static bool Matches(string value, string normalizedQuery)
+    {
+        if (string.IsNullOrEmpty(normalizedQuery)) return true;
+        return value?.IndexOf(normalizedQuery, StringComparison.OrdinalIgnoreCase) >= 0;
+    }
+
+    private static string CachedId(Dictionary<string, string> cache, string key, string prefix)
+    {
+        key ??= string.Empty;
+        if (cache.TryGetValue(key, out string value)) return value;
+        value = prefix + key;
+        cache[key] = value;
+        return value;
+    }
+
+    private static TValue Get<TValue>(Dictionary<string, TValue> dictionary, string key, TValue fallback)
+    {
+        if (dictionary.TryGetValue(key, out TValue value)) return value;
+        dictionary[key] = fallback;
+        return fallback;
+    }
+}

@@ -1,0 +1,380 @@
+using System;
+using DryCycle.DevUI.DevTool.Core;
+using DryCycle.DevUI.DevTool.Dialog;
+using DryCycle.DevUI.DevTool.Map;
+using DryCycle.DevUI.DevTool.Relationships;
+using DryCycle.DevUI.DevTool.Room;
+using DryCycle.DevUI.DevTool.Sound;
+using DryCycle.DevUI.DevTool.Triggers;
+using Num = System.Numerics;
+
+namespace DryCycle.DevUI.DevTool.RWImGui;
+
+internal sealed class RoomDevToolPage : DevToolFrontendPageBase
+{
+    public override string Id => "room";
+    public override EditorToolMode Mode => EditorToolMode.Room;
+    public override int NavigationOrder => 100;
+    public override string NavigationLabel => DevToolUiSettings.T("房间", "Room");
+    public override string NavigationTooltip => DevToolUiSettings.T("房间设置", "Room settings");
+    public override void DrawBrowser(EditorPresentationSnapshot snapshot) =>
+        RoomSettingsView.DrawBrowser(EditorRoomPresentationState.Current);
+
+    public override void DrawInspector(EditorPresentationSnapshot snapshot) =>
+        RoomSettingsView.DrawInspector(EditorRoomPresentationState.Current);
+
+    protected override void OnReset() => RoomSettingsView.ResetRetainedState();
+}
+
+internal sealed class ObjectsDevToolPage : DevToolFrontendPageBase
+{
+    private string activeDocument = string.Empty;
+    private bool sceneWorkspaceOpen;
+
+    public override string Id => "objects";
+    public override EditorToolMode Mode => EditorToolMode.Objects;
+    public override int NavigationOrder => 200;
+    public override string NavigationLabel => DevToolUiSettings.T("物件", "Objects");
+    public override string NavigationTooltip => DevToolUiSettings.T("物件", "Objects");
+    public override bool SupportsSceneSurface => true;
+    public override bool SupportsPlacementInput => true;
+    public override bool HasTopControls => true;
+
+    public override bool IsSceneSurfaceVisible(EditorPresentationSnapshot snapshot) =>
+        sceneWorkspaceOpen && DevToolUiSettings.SceneInCenter;
+
+    public override bool SuppressInspector(EditorPresentationSnapshot snapshot) =>
+        snapshot.Inspector?.HasSelection != true;
+
+    public override void DrawBackground(EditorPresentationSnapshot snapshot, Num.Vector2 display)
+    {
+        EnsureDocument(snapshot);
+
+        // Scene mouse priority is intentional: semantic handles own clicks before the generic
+        // object-position point, and marquee selection receives only otherwise-unclaimed room space.
+        NativeObjectGizmoView.Draw(snapshot, display);
+        NativeSpatialGizmoView.DrawObjects(snapshot, display);
+        ObjectSceneLabelView.Draw(snapshot, display);
+        ObjectMarqueeSelectionView.Draw(snapshot, display);
+    }
+
+    public override void DrawBrowser(EditorPresentationSnapshot snapshot) =>
+        ObjectExplorerView.Draw(snapshot);
+
+    public override void DrawInspector(EditorPresentationSnapshot snapshot) =>
+        ObjectInspectorView.Draw(snapshot.Inspector);
+
+    public override void DrawTopControls(EditorPresentationSnapshot snapshot)
+    {
+        string sceneLabel =
+            DevToolUiSettings.T(
+                "场景",
+                "Scene");
+
+        if (DevToolWidgets.ActionButton(
+                sceneLabel,
+                "ObjectsTopScene",
+                sceneWorkspaceOpen
+                    ? DevToolButtonTone.Primary
+                    : DevToolButtonTone.Subtle))
+        {
+            sceneWorkspaceOpen =
+                !sceneWorkspaceOpen;
+
+            if (sceneWorkspaceOpen &&
+                !DevToolUiSettings.SceneInCenter)
+            {
+                // The new Object-page Scene control owns the floating Scene surface. Old installs
+                // may still carry the retired left-browser placement preference, so opening Scene
+                // promotes it to the center/floating placement instead of yielding a button that
+                // appears active while no Scene window can be shown.
+                DevToolUiSettings.ScenePlacement =
+                    DevToolScenePlacement.Center;
+            }
+        }
+
+        if (ImGuiNET.ImGui.IsItemHovered())
+        {
+            DevToolTooltip.Show(
+                sceneWorkspaceOpen
+                    ? DevToolUiSettings.T(
+                        "隐藏物件场景窗口",
+                        "Hide the Objects Scene window")
+                    : DevToolUiSettings.T(
+                        "显示物件场景窗口",
+                        "Show the Objects Scene window"));
+        }
+    }
+
+    public override void DrawSceneWorkspace(EditorPresentationSnapshot snapshot) =>
+        ObjectSceneWorkspaceView.Draw(snapshot);
+
+    protected override DevToolPageStatusState BuildSessionStatusState(EditorPresentationSnapshot snapshot) =>
+        new(
+            countA: snapshot.SceneObjects?.Length ?? 0,
+            countB: snapshot.Inspector?.SelectionCount ?? 0,
+            flag: snapshot.PlacementActive,
+            textA: snapshot.PlacementType);
+
+    protected override string FormatSessionStatus(DevToolPageStatusState state) =>
+        DevToolUiSettings.T("物件 ", "Objects ") + state.CountA +
+        DevToolUiSettings.T(" | 已选 ", " | Selected ") + state.CountB +
+        (state.Flag ? DevToolUiSettings.T(" | 放置 ", " | Placing ") + state.TextA : string.Empty);
+
+    protected override void OnDeactivate()
+    {
+        // Page switches happen after ToolMode has changed. Frontend gesture state must be retired
+        // immediately, but scene filters/search are intentionally retained for a return to the same
+        // document. The queued backend Cancel commands are allowed to complete off-page.
+        NativeSpatialGizmoView.ResetRetainedState();
+        NativeObjectGizmoView.ResetRetainedState();
+        ObjectMarqueeSelectionView.Reset();
+        ObjectSceneLabelView.ResetRetainedState();
+    }
+
+    protected override void OnReset()
+    {
+        activeDocument = string.Empty;
+        sceneWorkspaceOpen = false;
+        ResetObjectFrontendState();
+    }
+
+    private void EnsureDocument(EditorPresentationSnapshot snapshot)
+    {
+        string document = snapshot?.Document ?? string.Empty;
+        if (string.Equals(activeDocument, document, StringComparison.Ordinal))
+            return;
+
+        activeDocument = document;
+        sceneWorkspaceOpen = false;
+        ResetObjectFrontendState();
+    }
+
+    private static void ResetObjectFrontendState()
+    {
+        // Shared scene policy has one lifecycle owner: the Objects page. Child views reset only
+        // their own retained caches so document switches cannot leave stale search/focus/hover state.
+        ObjectSceneVisibilityState.Reset();
+        ObjectSceneProjectionPolicy.Reset();
+        ObjectSceneListProjection.Reset();
+
+        NativeSpatialGizmoView.ResetRetainedState();
+        NativeObjectGizmoView.ResetRetainedState();
+        ObjectMarqueeSelectionView.ResetRetainedState();
+        ObjectSceneLabelView.ResetRetainedState();
+        ObjectExplorerView.ResetRetainedState();
+        ObjectSceneWorkspaceView.ResetRetainedState();
+        ObjectInspectorView.ResetRetainedState();
+    }
+}
+
+internal sealed class SoundDevToolPage : DevToolFrontendPageBase
+{
+    public override string Id => "sound";
+    public override EditorToolMode Mode => EditorToolMode.Sound;
+    public override int NavigationOrder => 300;
+    public override string NavigationLabel => DevToolUiSettings.T("声音", "Sound");
+    public override string NavigationTooltip => DevToolUiSettings.T("声音", "Sound");
+    public override bool UsesDedicatedWorkspace => true;
+    public override bool SupportsSceneSurface => false;
+    public override bool HasTopControls => true;
+
+    public override void DrawBackground(EditorPresentationSnapshot snapshot, Num.Vector2 display) =>
+        NativeSpatialGizmoView.DrawSound(EditorSoundPresentationState.Current, display);
+
+    public override void DrawTopControls(EditorPresentationSnapshot snapshot) =>
+        SoundEditorView.DrawTopControls(EditorSoundPresentationState.Current);
+
+    public override void DrawBrowser(EditorPresentationSnapshot snapshot) =>
+        SoundEditorView.DrawBrowser(EditorSoundPresentationState.Current);
+
+    public override void DrawInspector(EditorPresentationSnapshot snapshot) =>
+        SoundEditorView.DrawInspector(EditorSoundPresentationState.Current);
+
+    public override void DrawSceneWorkspace(EditorPresentationSnapshot snapshot) =>
+        SoundEditorView.DrawSceneWorkspace(EditorSoundPresentationState.Current);
+
+    public override void DrawWorkspace(EditorPresentationSnapshot snapshot, Num.Vector2 display) =>
+        SoundEditorView.DrawWorkspace(
+            snapshot,
+            EditorSoundPresentationState.Current,
+            display);
+
+    protected override DevToolPageStatusState BuildSessionStatusState(EditorPresentationSnapshot snapshot) =>
+        new(countA: EditorSoundPresentationState.Current.Sounds?.Length ?? 0);
+
+    protected override string FormatSessionStatus(DevToolPageStatusState state) =>
+        DevToolUiSettings.T("声音 ", "Sounds ") + state.CountA;
+
+    protected override void OnReset()
+    {
+        NativeSpatialGizmoView.ResetRetainedState();
+        SoundEditorView.ResetRetainedState();
+        SoundLibraryGroupsView.ResetRetainedState();
+    }
+}
+
+internal sealed class TriggersDevToolPage : DevToolFrontendPageBase
+{
+    public override string Id => "triggers";
+    public override EditorToolMode Mode => EditorToolMode.Triggers;
+    public override int NavigationOrder => 400;
+    public override string NavigationLabel => DevToolUiSettings.T("触发器", "Triggers");
+    public override string NavigationTooltip => DevToolUiSettings.T("触发器", "Triggers");
+    public override bool UsesDedicatedWorkspace => true;
+    public override bool SupportsSceneSurface => false;
+    public override bool HasTopControls => true;
+    public override void DrawBackground(EditorPresentationSnapshot snapshot, Num.Vector2 display)
+    {
+        NativeSpatialGizmoView.DrawTriggers(
+            EditorTriggerPresentationState.Current,
+            display);
+        TriggerSceneLabelView.Draw(
+            EditorTriggerPresentationState.Current,
+            display);
+    }
+
+    public override void DrawTopControls(EditorPresentationSnapshot snapshot) =>
+        TriggerEditorView.DrawTopControls(
+            snapshot,
+            EditorTriggerPresentationState.Current);
+
+    public override void DrawBrowser(EditorPresentationSnapshot snapshot) =>
+        TriggerEditorView.DrawBrowser(EditorTriggerPresentationState.Current);
+
+    public override void DrawInspector(EditorPresentationSnapshot snapshot) =>
+        TriggerEditorView.DrawInspector(EditorTriggerPresentationState.Current);
+
+    public override void DrawSceneWorkspace(EditorPresentationSnapshot snapshot) =>
+        TriggerEditorView.DrawSceneWorkspace(EditorTriggerPresentationState.Current);
+
+    public override void DrawWorkspace(EditorPresentationSnapshot snapshot, Num.Vector2 display) =>
+        TriggerEditorView.DrawWorkspace(
+            snapshot,
+            EditorTriggerPresentationState.Current,
+            display);
+
+    protected override DevToolPageStatusState BuildSessionStatusState(EditorPresentationSnapshot snapshot) =>
+        new(countA: EditorTriggerPresentationState.Current.Triggers?.Length ?? 0);
+
+    protected override string FormatSessionStatus(DevToolPageStatusState state) =>
+        DevToolUiSettings.T("触发器 ", "Triggers ") + state.CountA;
+
+    protected override void OnActivate() =>
+        TriggerEditorView.EnterCanvasFirst();
+
+    protected override void OnDeactivate()
+    {
+        NativeSpatialGizmoView.ResetRetainedState();
+        TriggerSceneLabelView.ResetRetainedState();
+    }
+
+    protected override void OnReset()
+    {
+        NativeSpatialGizmoView.ResetRetainedState();
+        TriggerSceneLabelView.ResetRetainedState();
+        TriggerEditorView.ResetRetainedState();
+    }
+}
+
+internal sealed class MapDevToolPage : DevToolFrontendPageBase
+{
+    public override string Id => "map";
+    public override EditorToolMode Mode => EditorToolMode.Map;
+    public override int NavigationOrder => 500;
+    public override string NavigationLabel => DevToolUiSettings.T("地图", "Map");
+    public override string NavigationTooltip => DevToolUiSettings.T("地图", "Map");
+    public override bool UsesDedicatedWorkspace => true;
+
+    public override void DrawBackground(EditorPresentationSnapshot snapshot, Num.Vector2 display)
+    {
+        if (!snapshot.FocusMode) return;
+        DevToolWorkspaceLayout.GetCentralRect(display, out Num.Vector2 position, out Num.Vector2 size);
+        MapEditorView.DrawCanvas(EditorMapPresentationState.Current, position, size);
+    }
+
+    public override void DrawBrowser(EditorPresentationSnapshot snapshot) =>
+        MapEditorView.DrawBrowser(EditorMapPresentationState.Current);
+
+    public override void DrawInspector(EditorPresentationSnapshot snapshot) =>
+        MapEditorView.DrawInspector(EditorMapPresentationState.Current);
+
+    public override void DrawWorkspace(EditorPresentationSnapshot snapshot, Num.Vector2 display) =>
+        WorldWorkspaceView.Draw(snapshot, display);
+
+    protected override DevToolPageStatusState BuildSessionStatusState(EditorPresentationSnapshot snapshot)
+    {
+        EditorMapPresentationSnapshot map = EditorMapPresentationState.Current;
+        return new(countA: map.Rooms?.Length ?? 0, textA: map.RegionName);
+    }
+
+    protected override string FormatSessionStatus(DevToolPageStatusState state) =>
+        state.CountA + DevToolUiSettings.T(" 个房间 | ", " rooms | ") + state.TextA;
+
+    protected override void OnReset()
+    {
+        MapEditorView.ResetRetainedState();
+        WorldWorkspaceView.ResetRetainedState();
+    }
+}
+
+internal sealed class DialogDevToolPage : DevToolFrontendPageBase
+{
+    public override string Id => "dialog";
+    public override EditorToolMode Mode => EditorToolMode.Dialog;
+    public override int NavigationOrder => 600;
+    public override string NavigationLabel => DevToolUiSettings.T("对话", "Dialog");
+    public override string NavigationTooltip => DevToolUiSettings.T("对话", "Dialog");
+
+    public override void DrawBackground(EditorPresentationSnapshot snapshot, Num.Vector2 display)
+    {
+        DevToolWorkspaceLayout.GetCentralRect(display, out Num.Vector2 position, out Num.Vector2 size);
+        DialogEditorView.DrawPreview(EditorDialogPresentationState.Current, position, size);
+    }
+
+    public override void DrawBrowser(EditorPresentationSnapshot snapshot) =>
+        DialogEditorView.DrawBrowser(EditorDialogPresentationState.Current);
+
+    public override void DrawInspector(EditorPresentationSnapshot snapshot) =>
+        DialogEditorView.DrawInspector(EditorDialogPresentationState.Current);
+
+    protected override DevToolPageStatusState BuildSessionStatusState(EditorPresentationSnapshot snapshot)
+    {
+        EditorDialogPresentationSnapshot dialog = EditorDialogPresentationState.Current;
+        return new(countA: dialog.Events?.Length ?? 0, textA: dialog.SelectedFileName);
+    }
+
+    protected override string FormatSessionStatus(DevToolPageStatusState state) =>
+        state.TextA + " | " + state.CountA + DevToolUiSettings.T(" 个事件", " events");
+
+    protected override void OnReset() => DialogEditorView.ResetRetainedState();
+}
+
+internal sealed class RelationshipsDevToolPage : DevToolFrontendPageBase
+{
+    public override string Id => "relationships";
+    public override EditorToolMode Mode => EditorToolMode.Relationships;
+    public override int NavigationOrder => 700;
+    public override string NavigationLabel => DevToolUiSettings.T("关系", "Relationships");
+    public override string NavigationTooltip => DevToolUiSettings.T("关系", "Relationships");
+    public override bool UsesDedicatedWorkspace => true;
+    public override void DrawWorkspace(EditorPresentationSnapshot snapshot, Num.Vector2 display)
+    {
+        DevToolWorkspaceLayout.GetCentralRect(display, out Num.Vector2 position, out Num.Vector2 size);
+        RelationshipEditorView.DrawMatrix(EditorRelationshipPresentationState.Current, position, size);
+    }
+    public override void DrawBackground(EditorPresentationSnapshot snapshot, Num.Vector2 display)
+    {
+        if (snapshot.FocusMode) DrawWorkspace(snapshot, display);
+    }
+    public override void DrawBrowser(EditorPresentationSnapshot snapshot) { }
+    public override void DrawInspector(EditorPresentationSnapshot snapshot) { }
+
+    protected override DevToolPageStatusState BuildSessionStatusState(EditorPresentationSnapshot snapshot) =>
+        new(textA: EditorRelationshipPresentationState.Current.PrimaryCreature);
+
+    protected override string FormatSessionStatus(DevToolPageStatusState state) =>
+        DevToolUiSettings.T("主体 ", "Primary ") + state.TextA;
+
+    protected override void OnReset() => RelationshipEditorView.ResetRetainedState();
+}

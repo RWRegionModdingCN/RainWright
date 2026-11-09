@@ -1,0 +1,236 @@
+using DryCycle.DevUI.DevTool.Core;
+using Num = System.Numerics;
+
+namespace DryCycle.DevUI.DevTool.RWImGui;
+
+internal enum DevToolUiLanguage
+{
+    Chinese,
+    English
+}
+
+internal enum DevToolScenePlacement
+{
+    Left,
+    Center
+}
+
+/// <summary>
+/// Lightweight frontend-only presentation settings. Keep these separate from editor data so
+/// language, font and transparency never enter room saves or Undo/Redo history.
+/// </summary>
+internal static class DevToolUiSettings
+{
+    internal static float WindowAlpha => RainWrightPersonalSettings.WindowAlpha;
+    internal const float PopupAlpha = 0.68f;
+
+    // 18 px is the rebuilt-editor design scale and is also the English default. Keeping the
+    // default at the reference size prevents FontGlobalScale and layout scaling from doubling the
+    // whole UI on ordinary 1080p/1440p displays. Simplified Chinese remains slightly larger because
+    // the CJK face has a smaller visible glyph body at the same nominal ImGui font size.
+    internal const float ReferenceFontSize = 18f;
+    internal const float DefaultFontSize = 18f;
+    internal const float DefaultChineseFontSize = 21f;
+    internal const int DefaultFontWeight = 400;
+    internal const int DefaultChineseFontWeight = 500;
+    internal const float WindowOutlineWidth = 2f;
+
+    private static readonly Num.Vector4 DefaultTextColor = new(0.94f, 0.94f, 0.94f, 1f);
+    // Secondary labels are deliberately brighter than stock ImGui disabled text. In the DevTool
+    // these labels are structural headings, not disabled controls, and must remain readable over
+    // the semi-transparent room view.
+    private static readonly Num.Vector4 DefaultDisabledTextColor = new(0.76f, 0.80f, 0.86f, 1f);
+
+    // English is the startup-safe default. It can render with RWImGui's context default font and
+    // therefore does not depend on an external CJK font file being present or successfully added
+    // to the native font atlas. Chinese remains available as an explicit presentation choice.
+    // Keep independent font size/weight preferences so switching languages does not overwrite the
+    // other language's typography settings.
+    private static DevToolUiLanguage language = DevToolUiLanguage.English;
+    private static DevToolScenePlacement scenePlacement = DevToolScenePlacement.Center;
+    private static float chineseFontSize = DefaultChineseFontSize;
+    private static float englishFontSize = DefaultFontSize;
+    private static int englishFontWeight = DefaultFontWeight;
+    private static Num.Vector4 textColor = DefaultTextColor;
+    private static Num.Vector4 disabledTextColor = DefaultDisabledTextColor;
+
+    internal static DevToolUiLanguage Language => language;
+
+    internal static DevToolScenePlacement ScenePlacement
+    {
+        get => scenePlacement;
+        set
+        {
+            if (scenePlacement == value) return;
+            scenePlacement = value;
+            DevToolUserSettingsStore.NotifyPresentationChanged();
+        }
+    }
+
+    internal static bool SceneInCenter => scenePlacement == DevToolScenePlacement.Center;
+
+    internal static float FontSize
+    {
+        get => IsChinese ? chineseFontSize : englishFontSize;
+        set
+        {
+            float next = System.Math.Max(12f, System.Math.Min(72f, value));
+            if (IsChinese)
+            {
+                if (System.Math.Abs(chineseFontSize - next) <= 0.001f) return;
+                chineseFontSize = next;
+            }
+            else
+            {
+                if (System.Math.Abs(englishFontSize - next) <= 0.001f) return;
+                englishFontSize = next;
+            }
+
+            DevToolUserSettingsStore.NotifyPresentationChanged();
+        }
+    }
+
+    internal static int FontWeight
+    {
+        get => IsChinese ? DefaultChineseFontWeight : englishFontWeight;
+        set
+        {
+            if (IsChinese) return;
+            int next = System.Math.Max(100, System.Math.Min(900, value));
+            if (englishFontWeight == next) return;
+            englishFontWeight = next;
+            DevToolUserSettingsStore.NotifyPresentationChanged();
+        }
+    }
+
+    internal static string ChineseFontFamily
+    {
+        get => DevToolFontCatalog.DefaultChineseFamily;
+        set { }
+    }
+
+    internal static Num.Vector4 TextColor
+    {
+        get => textColor;
+        set
+        {
+            if (textColor.Equals(value)) return;
+            textColor = value;
+            DevToolUserSettingsStore.NotifyPresentationChanged();
+        }
+    }
+
+    internal static Num.Vector4 DisabledTextColor
+    {
+        get => disabledTextColor;
+        set
+        {
+            if (disabledTextColor.Equals(value)) return;
+            disabledTextColor = value;
+            DevToolUserSettingsStore.NotifyPresentationChanged();
+        }
+    }
+
+    internal static float PersistedChineseFontSize => chineseFontSize;
+    internal static float PersistedEnglishFontSize => englishFontSize;
+    internal static int PersistedEnglishFontWeight => englishFontWeight;
+
+    internal static bool IsChinese => language == DevToolUiLanguage.Chinese;
+    internal static float UiScale => FontSize / ReferenceFontSize;
+
+    internal static void SetLanguage(DevToolUiLanguage value)
+    {
+        if (language == value) return;
+        language = value;
+        DevToolUserSettingsStore.NotifyPresentationChanged();
+        DevToolFrontend.RequestContextRebuildForLanguageChange();
+    }
+
+    internal static void ResetFontAppearance()
+    {
+        chineseFontSize = DefaultChineseFontSize;
+        englishFontSize = DefaultFontSize;
+        englishFontWeight = DefaultFontWeight;
+        textColor = DefaultTextColor;
+        disabledTextColor = DefaultDisabledTextColor;
+        DevToolUserSettingsStore.NotifyPresentationChanged();
+    }
+
+    internal static void RestorePersistedPreferences(
+        DevToolUiLanguage restoredLanguage,
+        DevToolScenePlacement restoredScenePlacement,
+        float restoredChineseFontSize,
+        float restoredEnglishFontSize,
+        int restoredEnglishFontWeight,
+        Num.Vector4 restoredTextColor,
+        Num.Vector4 restoredDisabledTextColor)
+    {
+        language = restoredLanguage;
+        scenePlacement = restoredScenePlacement;
+        chineseFontSize = System.Math.Max(12f, System.Math.Min(72f, restoredChineseFontSize));
+        englishFontSize = System.Math.Max(12f, System.Math.Min(72f, restoredEnglishFontSize));
+        englishFontWeight = System.Math.Max(100, System.Math.Min(900, restoredEnglishFontWeight));
+        textColor = restoredTextColor;
+        disabledTextColor = restoredDisabledTextColor;
+    }
+
+    internal static string T(string chinese, string english)
+    {
+        // Early DevTool builds prefixed the seven main tool labels with R/O/S/T/M/D/L.
+        // The rebuilt toolbar now presents the localized full name only. Keep the cleanup here
+        // so both Chinese and English stay consistent without carrying duplicate abbreviation UI.
+        return StripLegacyToolPrefix(IsChinese ? chinese : english);
+    }
+
+    private static string StripLegacyToolPrefix(string value)
+    {
+        if (string.IsNullOrEmpty(value) || value.Length < 4 || value[1] != ' ' || value[2] != ' ')
+            return value;
+
+        switch (value[0])
+        {
+            case 'R':
+            case 'O':
+            case 'S':
+            case 'T':
+            case 'M':
+            case 'D':
+            case 'L':
+                return value.Substring(3);
+            default:
+                return value;
+        }
+    }
+
+    internal static string ToolMode(EditorToolMode mode)
+    {
+        // Do not use Enum.ToString() for the seven stable editor modes. ToolMode is queried by
+        // several always-visible windows every frame; fixed literals keep both languages allocation-free.
+        if (IsChinese)
+        {
+            return mode switch
+            {
+                EditorToolMode.Room => "房间",
+                EditorToolMode.Objects => "物件",
+                EditorToolMode.Sound => "声音",
+                EditorToolMode.Triggers => "触发器",
+                EditorToolMode.Map => "地图",
+                EditorToolMode.Dialog => "对话",
+                EditorToolMode.Relationships => "关系",
+                _ => mode.ToString()
+            };
+        }
+
+        return mode switch
+        {
+            EditorToolMode.Room => "Room",
+            EditorToolMode.Objects => "Objects",
+            EditorToolMode.Sound => "Sound",
+            EditorToolMode.Triggers => "Triggers",
+            EditorToolMode.Map => "Map",
+            EditorToolMode.Dialog => "Dialog",
+            EditorToolMode.Relationships => "Relationships",
+            _ => mode.ToString()
+        };
+    }
+}

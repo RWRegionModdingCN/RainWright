@@ -1,0 +1,13 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup><TargetFramework>net10.0</TargetFramework><OutputType>Exe</OutputType><LangVersion>13</LangVersion><ImplicitUsings>enable</ImplicitUsings><Nullable>disable</Nullable></PropertyGroup>
+  <ItemGroup>
+    <Compile Include="../../src/Rainwright/Backend/World/WorldDocument.cs" Link="Production/WorldDocument.cs" />
+    <Compile Include="../../src/Rainwright/Backend/World/WorldConnectionToken.cs" Link="Production/WorldConnectionToken.cs" />
+    <Compile Include="../../src/Rainwright/Backend/World/WorldFileVariants.cs" Link="Production/WorldFileVariants.cs" />
+    <Compile Include="../../src/Rainwright/Backend/World/WorldVariantFileTransaction.cs" Link="Production/WorldVariantFileTransaction.cs" />
+    <Compile Include="../../src/Rainwright/Backend/Map/LegacyMapLayoutMigration.cs" Link="Production/LegacyMapLayoutMigration.cs" />
+    <Compile Include="../../src/Rainwright/Backend/Map/PlayerMapRoomVisibility.cs" Link="Production/PlayerMapRoomVisibility.cs" />
+    <Compile Include="../../src/Rainwright/Backend/Map/PlayerMapRoomNamePolicy.cs" Link="Production/PlayerMapRoomNamePolicy.cs" />
+    <Compile Include="../../src/Rainwright/Backend/Core/EditorBackupFiles.cs" Link="Production/EditorBackupFiles.cs" />
+  </ItemGroup>
+</Project>
