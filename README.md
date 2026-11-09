@@ -22,4 +22,4 @@ RainWright 是面向《Rain World》区域创作者的可视化编辑器 Mod。�
 
 ## 许可证
 
-项目采用 [Apache-2.0](./LICENSE) 许可证。第三方字体和素材遵循各自的许可，详见 [第三方声明](./THIRD_PARTY_NOTICES.md)。
+项目采用 [Apache-2.0](./LICENSE) 许可证。
