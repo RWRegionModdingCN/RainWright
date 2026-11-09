@@ -127,7 +127,13 @@ internal sealed class WorldSourceFailureRetry
             catch (IOException error) when (IsSharingViolation(error)) { return false; }
         });
 
-    internal static bool IsSharingViolation(IOException error) => (error.HResult & 0xFFFF) == 32 || (error.HResult & 0xFFFF) == 33;
+    internal static bool IsSharingViolation(IOException error)
+    {
+        int code = error.HResult & 0xFFFF;
+        // .NET on Linux exposes EWOULDBLOCK as raw errno 11 rather than a Windows HRESULT.
+        // Keep the full-value/platform check so a bad-format HRESULT is not retried as a lock.
+        return code == 32 || code == 33 || (Path.DirectorySeparatorChar == '/' && error.HResult == 11);
+    }
 
     // Install before resolution so a source created during a failed read cannot be missed.
     // Explicit Reload and the existing OnModsInit boundary refresh the in-memory Mod context.

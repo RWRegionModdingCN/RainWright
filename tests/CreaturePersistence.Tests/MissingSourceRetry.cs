@@ -73,8 +73,17 @@ static partial class MissingSourceRegression
 
             WorldTextRegistry.Clear();
             using (File.Open(file, FileMode.Open, FileAccess.ReadWrite, FileShare.None))
+            {
+                IOException lockedError = null;
+                try { File.ReadAllText(file); }
+                catch (IOException error) { lockedError = error; }
+                check(lockedError != null && WorldSourceFailureRetry.IsSharingViolation(lockedError),
+                    "The platform's actual sharing-lock error is classified for retry; HResult=" + lockedError?.HResult);
                 check(!WorldTextRegistry.EnsureLoaded("ZZ") && WorldTextRegistry.LoadError != null,
                     "An exclusive author-file lock retains the actual read error.");
+            }
+            check(!WorldSourceFailureRetry.IsSharingViolation(new IOException("Bad file format", unchecked((int)0x8007000B))),
+                "A non-sharing file error is never converted into a lock-retry loop.");
             check(SpinWait.SpinUntil(() => { Thread.Sleep(10); return WorldTextRegistry.EnsureLoaded("ZZ"); }, 7000),
                 "A released sharing lock recovers through one known-file read probe even without a file notification.");
             check(File.ReadAllText(file) == text, "Sharing recovery must not write author data.");
