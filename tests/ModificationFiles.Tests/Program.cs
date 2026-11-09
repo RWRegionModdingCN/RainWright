@@ -5,6 +5,8 @@ internal static class Program
 {
     private static int checks;
     private static void Check(bool ok, string label) { if (!ok) throw new Exception(label); checks++; }
+    private static bool HiddenBackupOnWindows(string path) =>
+        !OperatingSystem.IsWindows() || (File.GetAttributes(path) & FileAttributes.Hidden) != 0;
     private static void Main(string[] args)
     {
         foreach (string token in new[] { "SU_A02<3>", "<3>SU_A02" })
@@ -192,19 +194,19 @@ internal static class Program
             string backupPath = backupSource + ".bak";
             File.WriteAllText(backupSource, "original");
             DryCycle.DevUI.DevTool.Persistence.EditorBackupFiles.Copy(backupSource, backupPath, true);
-            Check((File.GetAttributes(backupPath) & FileAttributes.Hidden) != 0 && (File.GetAttributes(backupSource) & FileAttributes.Hidden) == 0,
-                "Generated backups are hidden while author files stay visible.");
+            Check(File.ReadAllText(backupPath) == "original" && HiddenBackupOnWindows(backupPath) && (File.GetAttributes(backupSource) & FileAttributes.Hidden) == 0,
+                "Generated backups preserve original bytes and Windows hidden attributes while author files stay visible.");
             File.WriteAllText(backupSource, "second");
             DryCycle.DevUI.DevTool.Persistence.EditorBackupFiles.Copy(backupSource, backupPath, true);
-            Check(File.ReadAllText(backupPath) == "second" && (File.GetAttributes(backupPath) & FileAttributes.Hidden) != 0,
+            Check(File.ReadAllText(backupPath) == "second" && HiddenBackupOnWindows(backupPath),
                 "Repeated saves can overwrite hidden backups and keep them hidden.");
             string stagedBackup = backupSource + ".tmp"; File.WriteAllText(stagedBackup, "third");
             DryCycle.DevUI.DevTool.Persistence.EditorBackupFiles.Replace(stagedBackup, backupSource, backupPath);
-            Check(File.ReadAllText(backupSource) == "third" && File.ReadAllText(backupPath) == "second" && (File.GetAttributes(backupPath) & FileAttributes.Hidden) != 0,
+            Check(File.ReadAllText(backupSource) == "third" && File.ReadAllText(backupPath) == "second" && HiddenBackupOnWindows(backupPath),
                 "Atomic replacement keeps the previous bytes in a hidden backup.");
             File.WriteAllText(stagedBackup, "fourth");
             DryCycle.DevUI.DevTool.Persistence.EditorBackupFiles.Replace(stagedBackup, backupSource, backupPath);
-            Check(File.ReadAllText(backupSource) == "fourth" && File.ReadAllText(backupPath) == "third" && (File.GetAttributes(backupSource) & FileAttributes.Hidden) == 0 && (File.GetAttributes(backupPath) & FileAttributes.Hidden) != 0,
+            Check(File.ReadAllText(backupSource) == "fourth" && File.ReadAllText(backupPath) == "third" && (File.GetAttributes(backupSource) & FileAttributes.Hidden) == 0 && HiddenBackupOnWindows(backupPath),
                 "Repeat atomic saves preserve visible author destinations and hidden backups.");
             string retained = "// author's own patch\n[MERGE]\nROOMS\nSU_NEW : SU_A01\nEND ROOMS\n";
             string composed = ModificationFileComposer.Compose("A: 1\n", "A: 2\n", retained);

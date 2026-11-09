@@ -46,8 +46,11 @@ static class RoomRegistrationRegression
             string saved = File.ReadAllText(source);
             check(saved.Replace("ZZ_B : DISCONNECTED, DISCONNECTED\r\n", "").Replace("ZZ_ZERO : \r\n", "") == original,
                 "Registration only appends standard room records; existing connections, conditions, tags, creature text, unknown directives and CRLF stay exact.");
-            check(File.ReadAllText(source + ".bak") == original && (File.GetAttributes(source + ".bak") & FileAttributes.Hidden) != 0,
-                "Automatic registration keeps the unified hidden original backup.");
+            check(File.ReadAllText(source + ".bak") == original,
+                "Automatic registration keeps the unified original backup bytes.");
+            if (OperatingSystem.IsWindows())
+                check((File.GetAttributes(source + ".bak") & FileAttributes.Hidden) != 0,
+                    "Automatic registration keeps the original backup hidden on Windows.");
             check(!Directory.Exists(Path.Combine(root, "modify")) && !Directory.Exists(Path.Combine(root, "world", "zz", "rainwright")), "Ordinary room registration cannot manufacture modify or extension files.");
             check(taskField.GetValue(null) == null, "Completed discovery is retired instead of polling the room folder every frame.");
             int revision = WorldTextRegistry.Revision;

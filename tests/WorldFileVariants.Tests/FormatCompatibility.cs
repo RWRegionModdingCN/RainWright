@@ -69,9 +69,9 @@ static class FormatCompatibility
                         "Every discovered map row reaches the numeric fields expected by FloodForge and original MapPage.");
                 }
             }
-            check((File.GetAttributes(oldBackup) & FileAttributes.Hidden) != 0 && (File.GetAttributes(ExtraBackup()) & FileAttributes.Hidden) != 0 &&
+            check((!OperatingSystem.IsWindows() || ((File.GetAttributes(oldBackup) & FileAttributes.Hidden) != 0 && (File.GetAttributes(ExtraBackup()) & FileAttributes.Hidden) != 0)) &&
                 (File.GetAttributes(extra) & FileAttributes.Hidden) == 0 && (File.GetAttributes(LegacyMapLayoutMigration.XmlPath(map)) & FileAttributes.Hidden) == 0,
-                "Old and new backups are hidden while active world and map XML files remain visible.");
+                "Backups use Windows hidden attributes where supported while active world and map XML files remain visible.");
             string savedExtra = File.ReadAllText(extra), savedCombined = File.ReadAllText(combined), savedMap = File.ReadAllText(map);
             for (int round = 1; round <= 3; round++)
             {
