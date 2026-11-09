@@ -22,4 +22,4 @@ Enable the dependencies and RainWright in Remix, then enable the game's develope
 
 ## License
 
-RainWright is licensed under [Apache-2.0](./LICENSE). Third-party fonts and assets retain their own licenses; see [Third-party notices](./THIRD_PARTY_NOTICES.md).
+RainWright is licensed under [Apache-2.0](./LICENSE).
